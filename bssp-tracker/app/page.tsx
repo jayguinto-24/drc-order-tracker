@@ -10,32 +10,37 @@ import React, { useState } from "react";
    ================================================================= */
 
 const FONTS = `
-@import url('https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@600;700;800&family=Lato:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap');
 `;
 
+/* DRC Switchboards brand: primary red #CD1A30, charcoal/steel neutrals,
+   Barlow Semi Condensed for headings and Lato for body — pulled from
+   drcswitchboards.com.au's theme CSS. */
 const T = {
-  page: "#E4E9EB",
+  page: "#F1F1F1",
   panel: "#FFFFFF",
-  ink: "#101820",
-  steel: "#5A6B76",
-  faint: "#8B9AA3",
-  line: "#D3DBDF",
-  lineSoft: "#E3E8EA",
-  navy: "#1D3A4A",
-  navySoft: "#EAF0F3",
-  orange: "#E85A1C",
-  orangeSoft: "#FDECE2",
+  ink: "#1E2124",
+  steel: "#5B6166",
+  faint: "#8A9096",
+  line: "#DCDCDC",
+  lineSoft: "#EBEBEB",
+  navy: "#1E2124",
+  navySoft: "#EDEDED",
+  slate: "#797F84",
+  slateLine: "rgba(255,255,255,0.28)",
+  orange: "#CD1A30",
+  orangeSoft: "#FBE7E9",
   ok: "#1F7A55",
   okSoft: "#E5F3EC",
-  flag: "#C23B2E",
-  flagSoft: "#FBEAE7",
+  flag: "#CD1A30",
+  flagSoft: "#FBE7E9",
   pending: "#A9760B",
   pendingSoft: "#FBF1DC",
 };
 
 const font = {
-  display: "'Archivo', sans-serif",
-  body: "'Inter', sans-serif",
+  display: "'Barlow Semi Condensed', sans-serif",
+  body: "'Lato', sans-serif",
   mono: "'JetBrains Mono', monospace",
 };
 
@@ -341,21 +346,28 @@ function TopBar({ orders, activeOrderNo, setActiveOrderNo, role, requestRole, un
   onLock: (id: string) => void;
 }) {
   return (
-    <div style={{ background: T.navy, borderBottom: `4px solid ${T.orange}` }}>
+    <div style={{ background: T.slate, borderBottom: `4px solid ${T.orange}` }}>
       <div style={{ maxWidth: 1040, margin: "0 auto", padding: "18px 24px 0" }}>
-        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
-          <div>
-            <div style={{ fontFamily: font.display, fontWeight: 800, fontSize: 22, color: "#fff", letterSpacing: 0.3 }}>
-              BSSP ORDER TRACKER
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+            <div style={{ background: T.panel, borderRadius: 6, padding: "6px 10px", display: "flex", alignItems: "center" }}>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src="/drc-logo.png" alt="DRC Switchboards" style={{ height: 36, width: "auto", display: "block" }} />
             </div>
-            <div style={{ fontSize: 12, color: "#9FB4BF", marginTop: 2, letterSpacing: 0.3 }}>
-              Three-way count reconciliation — DRC ⇄ Border
+            <div style={{ width: 2, height: 36, background: T.orange }} />
+            <div>
+              <div style={{ fontFamily: font.display, fontWeight: 800, fontSize: 21, color: "#fff", letterSpacing: 0.4, textTransform: "uppercase" }}>
+                Order Tracker
+              </div>
+              <div style={{ fontSize: 11.5, color: "#E4E6E8", marginTop: 1, letterSpacing: 0.3 }}>
+                Three-way count reconciliation — DRC ⇄ Border
+              </div>
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             {(role === "david" || role === "jason") && (
               <button onClick={() => onLock(role)} style={{
-                background: "transparent", border: `1px solid #2C4C5C`, color: "#C7D6DC",
+                background: "transparent", border: `1px solid ${T.slateLine}`, color: "#fff",
                 borderRadius: 6, padding: "7px 12px", fontSize: 11.5, cursor: "pointer",
               }}>
                 Lock {role === "david" ? "David's" : "Jason's"} view
@@ -365,12 +377,12 @@ function TopBar({ orders, activeOrderNo, setActiveOrderNo, role, requestRole, un
               value={activeOrderNo}
               onChange={(e) => setActiveOrderNo(e.target.value)}
               style={{
-                background: "#16303D", color: "#fff", border: `1px solid #2C4C5C`, borderRadius: 6,
+                background: "rgba(0,0,0,0.18)", color: "#fff", border: `1px solid ${T.slateLine}`, borderRadius: 6,
                 padding: "8px 12px", fontFamily: font.mono, fontSize: 13, fontWeight: 600,
               }}
             >
               {Object.keys(orders).map((no) => (
-                <option key={no} value={no}>{no}</option>
+                <option key={no} value={no} style={{ color: T.ink }}>{no}</option>
               ))}
             </select>
           </div>
@@ -387,7 +399,7 @@ function TopBar({ orders, activeOrderNo, setActiveOrderNo, role, requestRole, un
                 onClick={() => requestRole(r.id)}
                 style={{
                   background: active ? T.panel : "transparent",
-                  color: active ? T.ink : "#C7D6DC",
+                  color: active ? T.orange : "#E4E6E8",
                   border: "none",
                   borderRadius: "8px 8px 0 0",
                   padding: "10px 16px 12px",
@@ -398,9 +410,9 @@ function TopBar({ orders, activeOrderNo, setActiveOrderNo, role, requestRole, un
               >
                 <div style={{ display: "flex", alignItems: "center", gap: 5, fontFamily: font.display, fontWeight: 700, fontSize: 13.5 }}>
                   {r.label}
-                  {isLocked && <LockGlyph color={active ? T.steel : "#8FA5AF"} />}
+                  {isLocked && <LockGlyph color={active ? T.orange : "#E4E6E8"} />}
                 </div>
-                <div style={{ fontSize: 10.5, marginTop: 2, color: active ? T.steel : "#8FA5AF", letterSpacing: 0.3, textTransform: "uppercase" }}>
+                <div style={{ fontSize: 10.5, marginTop: 2, color: active ? T.steel : "#C7CACD", letterSpacing: 0.3, textTransform: "uppercase" }}>
                   {r.tag}
                 </div>
               </button>
