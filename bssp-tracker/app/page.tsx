@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useMemo } from "react";
+import React, { useState } from "react";
 
 /* =================================================================
    BSSP ORDER TRACKER — prototype
@@ -39,9 +39,78 @@ const font = {
   mono: "'JetBrains Mono', monospace",
 };
 
+/* ------------------------- Types --------------------------- */
+
+type Line = {
+  id: string;
+  partNo: string;
+  desc: string;
+  colour: string;
+  qtyOrdered: number;
+};
+
+type CountMap = Record<string, number>;
+
+type DeliveryLeg = {
+  by: string;
+  counts: CountMap;
+};
+
+type Delivery = {
+  id: string;
+  runNo: number;
+  carrier: string;
+  docket: string;
+  status: string;
+  dispatch: DeliveryLeg | null;
+  receipt: DeliveryLeg | null;
+};
+
+type Order = {
+  orderNo: string;
+  status: string;
+  orderDate: string;
+  totalExGst: number;
+  source: string;
+  lines: Line[];
+  deliveries: Delivery[];
+};
+
+type OrdersMap = Record<string, Order>;
+
+type ReconLine = Line & {
+  dispatched: number;
+  received: number;
+  backOrder: number;
+  transitDelta: number | null;
+};
+
+type DeliveryDelta = {
+  runNo: number;
+  carrier: string;
+  docket: string;
+  sent: number;
+  got: number | null;
+  delta: number | null;
+};
+
+type TransitAlert = DeliveryDelta & { line: ReconLine };
+
+type Alerts = {
+  packing: ReconLine[];
+  backOrders: ReconLine[];
+  notStarted: ReconLine[];
+  transit: TransitAlert[];
+  clean: boolean;
+};
+
+type DraftLine = { partNo: string; desc: string; colour: string; qty: string };
+
+type ParsedOrder = { lines: Line[]; warnings: string[] };
+
 /* ------------------------- Seed data --------------------------- */
 
-const seedOrders = {
+const seedOrders: OrdersMap = {
   "BSSP-087": {
     orderNo: "BSSP-087",
     status: "open",
@@ -92,11 +161,11 @@ const RECEIVERS = ["Owen N", "Bree C", "Grace T"];
 
 /* ------------------------- Helpers --------------------------- */
 
-function sumCounts(map) {
+function sumCounts(map?: CountMap) {
   return Object.values(map || {}).reduce((a, b) => a + b, 0);
 }
 
-function lineReconciliation(order) {
+function lineReconciliation(order: Order): ReconLine[] {
   return order.lines.map((line) => {
     let dispatched = 0;
     let received = 0;
@@ -114,22 +183,22 @@ function lineReconciliation(order) {
   });
 }
 
-function deliveryDeltas(order, lineId) {
+function deliveryDeltas(order: Order, lineId: string): DeliveryDelta[] {
   return order.deliveries
     .filter((d) => d.dispatch?.counts?.[lineId] !== undefined)
     .map((d) => {
-      const sent = d.dispatch.counts[lineId] || 0;
+      const sent = d.dispatch!.counts[lineId] || 0;
       const got = d.receipt ? d.receipt.counts[lineId] || 0 : null;
       return { runNo: d.runNo, carrier: d.carrier, docket: d.docket, sent, got, delta: got === null ? null : sent - got };
     });
 }
 
-function classifyAlerts(order) {
+function classifyAlerts(order: Order): Alerts {
   const recon = lineReconciliation(order);
   const packing = recon.filter((l) => l.backOrder < 0);
   const backOrders = recon.filter((l) => l.backOrder > 0 && l.dispatched > 0);
   const notStarted = recon.filter((l) => l.dispatched === 0);
-  const transit = [];
+  const transit: TransitAlert[] = [];
   recon.forEach((l) => {
     deliveryDeltas(order, l.id).forEach((d) => {
       if (d.delta !== null && d.delta !== 0) transit.push({ line: l, ...d });
@@ -152,21 +221,21 @@ const ROLE_TABS = [
    gate for walkthroughs — the code ships in the bundle, so it is NOT real
    security. Production access control has to happen server-side (see
    Phase 1 of the implementation spec: role-scoped API responses). */
-const MASTER_PINS = { david: "1287", jason: "2471" };
+const MASTER_PINS: Record<string, string> = { david: "1287", jason: "2471" };
 
 export default function App() {
-  const [orders, setOrders] = useState(seedOrders);
+  const [orders, setOrders] = useState<OrdersMap>(seedOrders);
   const [activeOrderNo, setActiveOrderNo] = useState("BSSP-087");
   const [role, setRole] = useState("brett");
-  const [unlocked, setUnlocked] = useState({ david: false, jason: false });
-  const [pendingRole, setPendingRole] = useState(null);
+  const [unlocked, setUnlocked] = useState<Record<string, boolean>>({ david: false, jason: false });
+  const [pendingRole, setPendingRole] = useState<string | null>(null);
   const order = orders[activeOrderNo];
 
-  function updateOrder(orderNo, updater) {
+  function updateOrder(orderNo: string, updater: (o: Order) => Order) {
     setOrders((prev) => ({ ...prev, [orderNo]: updater(prev[orderNo]) }));
   }
 
-  function requestRole(id) {
+  function requestRole(id: string) {
     if ((id === "david" || id === "jason") && !unlocked[id]) {
       setPendingRole(id);
     } else {
@@ -174,12 +243,12 @@ export default function App() {
     }
   }
 
-  function lockRole(id) {
+  function lockRole(id: string) {
     setUnlocked((u) => ({ ...u, [id]: false }));
     setRole("brett");
   }
 
-  function unlockWith(id) {
+  function unlockWith(id: string) {
     setUnlocked((u) => ({ ...u, [id]: true }));
     setRole(id);
     setPendingRole(null);
@@ -217,12 +286,12 @@ export default function App() {
   );
 }
 
-function AccessGateModal({ roleId, onCancel, onUnlock }) {
+function AccessGateModal({ roleId, onCancel, onUnlock }: { roleId: string; onCancel: () => void; onUnlock: () => void }) {
   const [pin, setPin] = useState("");
   const [error, setError] = useState(false);
   const name = roleId === "david" ? "David" : "Jason";
 
-  function submit(e) {
+  function submit(e: React.FormEvent) {
     e.preventDefault();
     if (pin === MASTER_PINS[roleId]) {
       onUnlock();
@@ -237,9 +306,9 @@ function AccessGateModal({ roleId, onCancel, onUnlock }) {
       alignItems: "center", justifyContent: "center", zIndex: 50,
     }}>
       <form onSubmit={submit} style={{ background: T.panel, borderRadius: 12, padding: 24, width: 320, boxShadow: "0 12px 32px rgba(0,0,0,0.25)" }}>
-        <div style={{ fontFamily: font.display, fontWeight: 800, fontSize: 15 }}>{name}'s master access</div>
+        <div style={{ fontFamily: font.display, fontWeight: 800, fontSize: 15 }}>{name}&apos;s master access</div>
         <div style={{ fontSize: 12, color: T.faint, marginTop: 4, marginBottom: 14, lineHeight: 1.6 }}>
-          This view shows ordered, dispatched and received quantities in full. Enter {name}'s access code to continue.
+          This view shows ordered, dispatched and received quantities in full. Enter {name}&apos;s access code to continue.
         </div>
         <input
           autoFocus
@@ -250,7 +319,7 @@ function AccessGateModal({ roleId, onCancel, onUnlock }) {
           placeholder="Access code"
           style={{ ...inputStyle, letterSpacing: 3, fontFamily: font.mono, marginTop: 0 }}
         />
-        {error && <div style={{ fontSize: 11.5, color: T.flag, marginTop: 6 }}>That code doesn't match. Try again.</div>}
+        {error && <div style={{ fontSize: 11.5, color: T.flag, marginTop: 6 }}>That code doesn&apos;t match. Try again.</div>}
         <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
           <button type="button" onClick={onCancel} style={{ ...secondaryBtn, flex: 1 }}>Cancel</button>
           <button type="submit" style={{ ...primaryBtn, flex: 1 }}>Unlock</button>
@@ -262,7 +331,15 @@ function AccessGateModal({ roleId, onCancel, onUnlock }) {
 
 /* ------------------------- Top bar --------------------------- */
 
-function TopBar({ orders, activeOrderNo, setActiveOrderNo, role, requestRole, unlocked, onLock }) {
+function TopBar({ orders, activeOrderNo, setActiveOrderNo, role, requestRole, unlocked, onLock }: {
+  orders: OrdersMap;
+  activeOrderNo: string;
+  setActiveOrderNo: (no: string) => void;
+  role: string;
+  requestRole: (id: string) => void;
+  unlocked: Record<string, boolean>;
+  onLock: (id: string) => void;
+}) {
   return (
     <div style={{ background: T.navy, borderBottom: `4px solid ${T.orange}` }}>
       <div style={{ maxWidth: 1040, margin: "0 auto", padding: "18px 24px 0" }}>
@@ -335,7 +412,7 @@ function TopBar({ orders, activeOrderNo, setActiveOrderNo, role, requestRole, un
   );
 }
 
-function LockGlyph({ color }) {
+function LockGlyph({ color }: { color: string }) {
   return (
     <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="3">
       <rect x="4" y="11" width="16" height="10" rx="2" />
@@ -346,8 +423,8 @@ function LockGlyph({ color }) {
 
 /* ------------------------- Master view --------------------------- */
 
-function MasterView({ order, viewer }) {
-  const [expanded, setExpanded] = useState(null);
+function MasterView({ order, viewer }: { order: Order; viewer: string }) {
+  const [expanded, setExpanded] = useState<string | null>(null);
   const recon = lineReconciliation(order);
   const alerts = classifyAlerts(order);
   const isJason = viewer === "jason";
@@ -409,13 +486,13 @@ function MasterView({ order, viewer }) {
 
       <p style={{ fontSize: 11.5, color: T.faint, marginTop: 14, lineHeight: 1.6 }}>
         {viewer === "david" ? "David" : "Jason"} sees the complete picture — ordered, dispatched and received —
-        exactly as agreed. Packers and goods-in never see the numbers they're checked against. Click any row for its per-delivery breakdown.
+        exactly as agreed. Packers and goods-in never see the numbers they&apos;re checked against. Click any row for its per-delivery breakdown.
       </p>
     </div>
   );
 }
 
-function statusFor(l) {
+function statusFor(l: ReconLine): { label: string; bg: string; fg: string } {
   if (l.transitDelta && l.transitDelta !== 0) return { label: "Transit loss", bg: T.flagSoft, fg: T.flag };
   if (l.backOrder < 0) return { label: "Over-dispatched", bg: T.flagSoft, fg: T.flag };
   if (l.dispatched === 0) return { label: "Not started", bg: T.lineSoft, fg: T.steel };
@@ -423,7 +500,7 @@ function statusFor(l) {
   return { label: "Reconciled", bg: T.okSoft, fg: T.ok };
 }
 
-function Pill({ label, bg, fg }) {
+function Pill({ label, bg, fg }: { label: string; bg: string; fg: string }) {
   return (
     <span style={{ background: bg, color: fg, fontSize: 10.5, fontWeight: 600, padding: "4px 9px", borderRadius: 20, letterSpacing: 0.2 }}>
       {label}
@@ -431,7 +508,7 @@ function Pill({ label, bg, fg }) {
   );
 }
 
-function SummaryStrip({ order, recon }) {
+function SummaryStrip({ order, recon }: { order: Order; recon: ReconLine[] }) {
   const totalOrdered = recon.reduce((a, l) => a + l.qtyOrdered, 0);
   const totalDispatched = recon.reduce((a, l) => a + l.dispatched, 0);
   const totalReceived = recon.reduce((a, l) => a + l.received, 0);
@@ -453,7 +530,7 @@ function SummaryStrip({ order, recon }) {
   );
 }
 
-function DeliveryRail({ order }) {
+function DeliveryRail({ order }: { order: Order }) {
   if (order.deliveries.length === 0) {
     return (
       <div style={{ border: `1px dashed ${T.line}`, borderRadius: 10, padding: 16, marginBottom: 16, fontSize: 12.5, color: T.faint, textAlign: "center" }}>
@@ -483,7 +560,7 @@ function DeliveryRail({ order }) {
   );
 }
 
-function PerDeliveryBreakdown({ order, lineId }) {
+function PerDeliveryBreakdown({ order, lineId }: { order: Order; lineId: string }) {
   const rows = deliveryDeltas(order, lineId);
   if (rows.length === 0) return <div style={{ fontSize: 12, color: T.faint, padding: "10px 0" }}>No dispatches recorded yet.</div>;
   return (
@@ -514,7 +591,7 @@ function PerDeliveryBreakdown({ order, lineId }) {
   );
 }
 
-function AlertsPanel({ alerts, isJason }) {
+function AlertsPanel({ alerts, isJason }: { order?: Order; alerts: Alerts; isJason: boolean }) {
   if (alerts.clean) {
     return (
       <div style={{ background: T.okSoft, border: `1px solid ${T.ok}33`, borderRadius: 10, padding: "12px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 10 }}>
@@ -539,7 +616,7 @@ function AlertsPanel({ alerts, isJason }) {
       {alerts.transit.length > 0 && (
         <AlertGroup title="In transit" color={T.flag}>
           {alerts.transit.map((r, i) => (
-            <div key={i}>{r.line.partNo} — run {String(r.runNo).padStart(2, "0")} ({r.carrier}): sent {r.sent}, received {r.got}, {r.delta > 0 ? `${r.delta} missing` : `${Math.abs(r.delta)} extra`}</div>
+            <div key={i}>{r.line.partNo} — run {String(r.runNo).padStart(2, "0")} ({r.carrier}): sent {r.sent}, received {r.got}, {(r.delta ?? 0) > 0 ? `${r.delta} missing` : `${Math.abs(r.delta ?? 0)} extra`}</div>
           ))}
         </AlertGroup>
       )}
@@ -554,7 +631,7 @@ function AlertsPanel({ alerts, isJason }) {
   );
 }
 
-function AlertGroup({ title, color, children }) {
+function AlertGroup({ title, color, children }: { title: string; color: string; children: React.ReactNode }) {
   return (
     <div style={{ marginTop: 8 }}>
       <div style={{ fontSize: 10.5, fontWeight: 700, color, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 3 }}>{title}</div>
@@ -563,7 +640,7 @@ function AlertGroup({ title, color, children }) {
   );
 }
 
-function StampMark({ ok }) {
+function StampMark({ ok }: { ok: boolean }) {
   return (
     <div style={{
       width: 26, height: 26, borderRadius: "50%", border: `2px solid ${ok ? T.ok : T.flag}`,
@@ -581,13 +658,13 @@ function StampMark({ ok }) {
    Accepts a header row containing some form of: part, description,
    colour, qty. Column order and exact naming are flexible; anything
    unrecognised is skipped with a warning rather than silently guessed. */
-function parseDelimitedOrder(text) {
+function parseDelimitedOrder(text: string): ParsedOrder {
   const rows = text.split(/\r?\n/).map((r) => r.trim()).filter((r) => r.length > 0);
   if (rows.length < 2) return { lines: [], warnings: ["No data rows found below the header."] };
   const delim = rows[0].includes("\t") ? "\t" : ",";
   const header = rows[0].split(delim).map((h) => h.trim().toLowerCase());
 
-  const find = (...keys) => header.findIndex((h) => keys.some((k) => h.includes(k)));
+  const find = (...keys: string[]) => header.findIndex((h) => keys.some((k) => h.includes(k)));
   const idx = {
     partNo: find("part", "sku", "code"),
     desc: find("desc", "item", "name"),
@@ -595,11 +672,11 @@ function parseDelimitedOrder(text) {
     qty: find("qty", "quantity", "ordered"),
   };
 
-  const warnings = [];
+  const warnings: string[] = [];
   if (idx.partNo === -1) warnings.push("No 'part number' column found — using column 1.");
   if (idx.qty === -1) warnings.push("No 'quantity' column found — lines without a recognisable qty will be skipped.");
 
-  const lines = [];
+  const lines: Line[] = [];
   rows.slice(1).forEach((row, i) => {
     const cells = row.split(delim).map((c) => c.trim());
     const partNo = cells[idx.partNo !== -1 ? idx.partNo : 0] || "";
@@ -621,20 +698,25 @@ function parseDelimitedOrder(text) {
   return { lines, warnings };
 }
 
-function OrderingView({ orders, setOrders, activeOrderNo, setActiveOrderNo }) {
+function OrderingView({ orders, setOrders, activeOrderNo, setActiveOrderNo }: {
+  orders: OrdersMap;
+  setOrders: React.Dispatch<React.SetStateAction<OrdersMap>>;
+  activeOrderNo: string;
+  setActiveOrderNo: (no: string) => void;
+}) {
   const [mode, setMode] = useState("manual"); // 'manual' | 'import'
   const [newOrderNo, setNewOrderNo] = useState("");
-  const [lines, setLines] = useState([{ partNo: "", desc: "", colour: "", qty: "" }]);
+  const [lines, setLines] = useState<DraftLine[]>([{ partNo: "", desc: "", colour: "", qty: "" }]);
 
   const [importOrderNo, setImportOrderNo] = useState("");
   const [rawText, setRawText] = useState("");
   const [fileName, setFileName] = useState("");
-  const [preview, setPreview] = useState(null); // { lines, warnings }
+  const [preview, setPreview] = useState<ParsedOrder | null>(null);
 
   function addLine() {
     setLines([...lines, { partNo: "", desc: "", colour: "", qty: "" }]);
   }
-  function updateLine(i, field, val) {
+  function updateLine(i: number, field: keyof DraftLine, val: string) {
     setLines(lines.map((l, idx) => (idx === i ? { ...l, [field]: val } : l)));
   }
   function createOrder() {
@@ -646,7 +728,7 @@ function OrderingView({ orders, setOrders, activeOrderNo, setActiveOrderNo }) {
     setLines([{ partNo: "", desc: "", colour: "", qty: "" }]);
   }
 
-  function commitOrder(orderNo, lineList) {
+  function commitOrder(orderNo: string, lineList: Line[]) {
     setOrders((prev) => ({
       ...prev,
       [orderNo]: {
@@ -662,21 +744,21 @@ function OrderingView({ orders, setOrders, activeOrderNo, setActiveOrderNo }) {
     setActiveOrderNo(orderNo);
   }
 
-  function handleFile(e) {
-    const file = e.target.files[0];
+  function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
     if (!file) return;
     setFileName(file.name);
     if (!importOrderNo) setImportOrderNo(file.name.replace(/\.(csv|txt|tsv)$/i, ""));
     const reader = new FileReader();
     reader.onload = (evt) => {
-      const text = String(evt.target.result);
+      const text = String(evt.target?.result);
       setRawText(text);
       setPreview(parseDelimitedOrder(text));
     };
     reader.readAsText(file);
   }
 
-  function handlePasteChange(val) {
+  function handlePasteChange(val: string) {
     setRawText(val);
     setPreview(val.trim() ? parseDelimitedOrder(val) : null);
   }
@@ -819,12 +901,12 @@ function OrderingView({ orders, setOrders, activeOrderNo, setActiveOrderNo }) {
 
 /* ------------------------- Packing view (blind) --------------------------- */
 
-function PackingView({ order, updateOrder }) {
-  const [selectedDeliveryId, setSelectedDeliveryId] = useState(null);
+function PackingView({ order, updateOrder }: { order: Order; updateOrder: (updater: (o: Order) => Order) => void }) {
+  const [selectedDeliveryId, setSelectedDeliveryId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [carrier, setCarrier] = useState("BSSP Truck");
   const [docket, setDocket] = useState("");
-  const [counts, setCounts] = useState({});
+  const [counts, setCounts] = useState<CountMap>({});
   const [countedBy, setCountedBy] = useState(PACKERS[0]);
   const [submitted, setSubmitted] = useState(false);
 
@@ -913,7 +995,7 @@ function PackingView({ order, updateOrder }) {
         </div>
       )}
 
-      {submitted && (
+      {submitted && editing && (
         <ConfirmBanner text={`Run ${String(editing.runNo).padStart(2, "0")} submitted and locked. It's now visible to David and Jason on the master ledger.`}
           onDone={() => { setSelectedDeliveryId(null); setSubmitted(false); }} />
       )}
@@ -923,15 +1005,15 @@ function PackingView({ order, updateOrder }) {
 
 /* ------------------------- Receiving view (blind) --------------------------- */
 
-function ReceivingView({ order, updateOrder }) {
-  const [selectedDeliveryId, setSelectedDeliveryId] = useState(null);
-  const [counts, setCounts] = useState({});
+function ReceivingView({ order, updateOrder }: { order: Order; updateOrder: (updater: (o: Order) => Order) => void }) {
+  const [selectedDeliveryId, setSelectedDeliveryId] = useState<string | null>(null);
+  const [counts, setCounts] = useState<CountMap>({});
   const [countedBy, setCountedBy] = useState(RECEIVERS[0]);
   const [submitted, setSubmitted] = useState(false);
 
   const arrivable = order.deliveries.filter((d) => d.status === "dispatched");
   const editing = order.deliveries.find((d) => d.id === selectedDeliveryId);
-  const linesInDelivery = editing ? order.lines.filter((l) => editing.dispatch.counts[l.id] !== undefined) : [];
+  const linesInDelivery = editing ? order.lines.filter((l) => editing.dispatch?.counts[l.id] !== undefined) : [];
 
   function submit() {
     updateOrder((o) => ({
@@ -991,7 +1073,7 @@ function ReceivingView({ order, updateOrder }) {
         </div>
       )}
 
-      {submitted && (
+      {submitted && editing && (
         <ConfirmBanner text={`Run ${String(editing.runNo).padStart(2, "0")} receipt logged. Any mismatch is now pinned on the master ledger.`}
           onDone={() => { setSelectedDeliveryId(null); setSubmitted(false); }} />
       )}
@@ -1001,7 +1083,7 @@ function ReceivingView({ order, updateOrder }) {
 
 /* ------------------------- Shared bits --------------------------- */
 
-function SectionHeader({ title, note }) {
+function SectionHeader({ title, note }: { title: string; note: string }) {
   return (
     <div style={{ marginBottom: 16 }}>
       <div style={{ fontFamily: font.display, fontWeight: 800, fontSize: 18 }}>{title}</div>
@@ -1010,7 +1092,7 @@ function SectionHeader({ title, note }) {
   );
 }
 
-function ConfirmBanner({ text, onDone }) {
+function ConfirmBanner({ text, onDone }: { text: string; onDone: () => void }) {
   return (
     <div style={{ background: T.okSoft, border: `1px solid ${T.ok}33`, borderRadius: 10, padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
       <div style={{ fontSize: 13, color: T.ok }}>{text}</div>
@@ -1019,19 +1101,19 @@ function ConfirmBanner({ text, onDone }) {
   );
 }
 
-const inputStyle = {
+const inputStyle: React.CSSProperties = {
   width: "100%", padding: "8px 10px", border: `1px solid ${T.line}`, borderRadius: 6,
   fontSize: 13, fontFamily: font.body, marginTop: 4, boxSizing: "border-box", background: "#FAFBFC",
 };
 
-const labelStyle = { fontSize: 11, color: T.faint, textTransform: "uppercase", letterSpacing: 0.4, display: "block", marginTop: 10 };
+const labelStyle: React.CSSProperties = { fontSize: 11, color: T.faint, textTransform: "uppercase", letterSpacing: 0.4, display: "block", marginTop: 10 };
 
-const primaryBtn = {
+const primaryBtn: React.CSSProperties = {
   background: T.navy, color: "#fff", border: "none", borderRadius: 6, padding: "9px 16px",
   fontSize: 13, fontWeight: 600, cursor: "pointer",
 };
 
-const secondaryBtn = {
+const secondaryBtn: React.CSSProperties = {
   background: "transparent", color: T.ink, border: `1px solid ${T.line}`, borderRadius: 6, padding: "9px 16px",
   fontSize: 13, fontWeight: 600, cursor: "pointer",
 };
