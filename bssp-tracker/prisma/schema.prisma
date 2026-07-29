@@ -1,0 +1,61 @@
+// Prisma schema — BSSP order tracker
+// Run `npx prisma generate` after any change here, and `npx prisma migrate dev`
+// (or `db push` while prototyping) to apply it to the database.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Order {
+  id         String     @id @default(cuid())
+  orderNo    String     @unique
+  status     String     @default("open")
+  orderDate  DateTime   @default(now())
+  totalExGst Float      @default(0)
+  source     String     @default("manual")
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+  lines      Line[]
+  deliveries Delivery[]
+}
+
+model Line {
+  id         String  @id @default(cuid())
+  orderId    String
+  order      Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  partNo     String
+  desc       String
+  colour     String
+  qtyOrdered Int
+  // Jason's own count of what the order should be — entered independently on
+  // the Border side, may legitimately differ from the PO qty Brett entered.
+  jasonQty   Int?
+
+  @@index([orderId])
+}
+
+model Delivery {
+  id      String @id @default(cuid())
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  runNo   Int
+  carrier String
+  docket  String
+  status  String // draft | dispatched | received
+
+  // Blind counts, keyed by Line.id. Border can't see receiptCounts and DRC
+  // goods-in can't see dispatchCounts until both sides have submitted.
+  dispatchBy     String?
+  dispatchCounts Json?
+  receiptBy      String?
+  receiptCounts  Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([orderId])
+}

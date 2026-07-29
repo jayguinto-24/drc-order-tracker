@@ -1,36 +1,54 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+BSSP order tracker — three-way blind count reconciliation between DRC and Border, built on Next.js (App Router) with a Postgres backend via Prisma, and email notifications via Resend.
 
-## Getting Started
+## First-time setup
 
-First, run the development server:
+1. Install dependencies:
+   ```bash
+   npm install
+   ```
+2. Copy `.env.example` to `.env` and fill in real values (see below).
+3. Push the schema to your database:
+   ```bash
+   npx prisma db push
+   ```
+4. (Optional) load demo data:
+   ```bash
+   npm run db:seed
+   ```
+5. Run the dev server:
+   ```bash
+   npm run dev
+   ```
+   Open [http://localhost:3000](http://localhost:3000).
+
+## Environment variables
+
+| Variable | Purpose |
+| --- | --- |
+| `DATABASE_URL` | Postgres connection string. On Vercel/serverless, use your provider's **pooled** connection string (Neon: "pooled connection"; Supabase: the port-6543 "Transaction" pooler) — otherwise serverless functions exhaust the database's connection limit. |
+| `RESEND_API_KEY` | API key from [resend.com](https://resend.com). Without it, the app runs fine but skips sending emails (logs a warning instead). |
+| `EMAIL_FROM` | Sender address — must be on a domain verified in Resend. |
+| `NOTIFY_DISPATCH_EMAILS` | Comma-separated recipients notified when a new despatch is created. |
+| `NOTIFY_DISCREPANCY_EMAILS` | Comma-separated recipients notified when a dispatch/receipt count doesn't reconcile. |
+
+## What's in here
+
+- **DRC tab** — order creation (manual entry or CSV/TSV import) and the master ledger, combined into one PIN-gated tab.
+- **Jason tab** — the same master ledger, plus an editable "Jason count" column (Jason's own tally, independent of the PO qty).
+- **Packing crew / Goods in** — blind count entry for Border's dispatch and DRC's goods-in, unchanged from the original prototype.
+- Discrepancy and new-despatch emails fire from the server actions in `lib/actions.ts` — see `lib/email.ts` for the templates.
+
+No live sync between browser sessions: each device fetches the ledger on page load and after its own actions, but won't see another device's update until it refreshes. Fine for the current one-device-per-role usage; would need polling or websockets if that changes.
+
+## Useful scripts
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm run db:push     # apply prisma/schema.prisma to the database
+npm run db:migrate   # create a migration (use instead of db:push once this is past prototyping)
+npm run db:seed      # load two demo orders
+npm run db:studio    # browse the database in Prisma Studio
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Deploying
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Standard Next.js deploy (Vercel or otherwise) — see the [Next.js deployment docs](https://nextjs.org/docs/app/getting-started/deploying). Set the environment variables above in your host's dashboard. `postinstall` runs `prisma generate` automatically.
