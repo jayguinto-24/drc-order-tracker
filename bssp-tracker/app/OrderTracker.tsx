@@ -1,13 +1,21 @@
 "use client";
 
 import React, { useState } from "react";
+import * as XLSX from "xlsx";
 import {
+  acceptOverSupply,
+  addPerson,
+  addRecipient,
   createImportOrder,
   createManualOrder,
-  startDelivery,
-  submitDispatch,
-  submitReceipt,
+  removePerson,
+  removeRecipient,
+  requestPoIncrease,
+  startRun,
+  submitRunDispatch,
+  submitRunReceipt,
   updateJasonQty,
+  updateLineQty,
 } from "@/lib/actions";
 import { deliveryDeltas, lineReconciliation, classifyAlerts } from "@/lib/recon";
 import type {
@@ -15,9 +23,12 @@ import type {
   CountMap,
   Delivery,
   DraftLine,
+  NotifyRecipient,
   Order,
   OrdersMap,
   ParsedOrder,
+  Person,
+  PersonRole,
   ReconLine,
 } from "@/lib/types";
 
@@ -65,21 +76,25 @@ const font = {
   mono: "'JetBrains Mono', monospace",
 };
 
-const PACKERS = ["Craig G", "Terry M", "Josh P"];
-const RECEIVERS = ["Owen N", "Bree C", "Grace T"];
+/* Used until someone adds real names on the Setup tab. */
+const DEFAULT_PACKERS = ["Craig G", "Terry M", "Josh P"];
+const DEFAULT_RECEIVERS = ["Owen N", "Bree C", "Grace T"];
+
+const CARRIERS = ["BSSP Truck", "Mainfreight", "Other"];
 
 /* ------------------------- Helpers --------------------------- */
 
-/* Flexible parser for pasted / uploaded order data (CSV or TSV). Accepts a
-   header row containing some form of: part, description, colour, qty.
-   Column order and exact naming are flexible; anything unrecognised is
-   skipped with a warning rather than silently guessed. */
-function parseDelimitedOrder(text: string): ParsedOrder {
-  const rows = text.split(/\r?\n/).map((r) => r.trim()).filter((r) => r.length > 0);
-  if (rows.length < 2) return { lines: [], warnings: ["No data rows found below the header."] };
-  const delim = rows[0].includes("\t") ? "\t" : ",";
-  const header = rows[0].split(delim).map((h) => h.trim().toLowerCase());
+/* Shared row-processor for both the plain CSV/TSV path and the XLS/XLSX path
+   below — takes already-split rows of cells and does header detection +
+   line parsing. Accepts a header row containing some form of: part,
+   description, colour, qty. Column order and exact naming are flexible;
+   anything unrecognised is skipped with a warning rather than silently
+   guessed. */
+function linesFromRows(rows: string[][]): ParsedOrder {
+  const cleaned = rows.map((r) => r.map((c) => String(c ?? "").trim())).filter((r) => r.some((c) => c.length > 0));
+  if (cleaned.length < 2) return { lines: [], warnings: ["No data rows found below the header."] };
 
+  const header = cleaned[0].map((h) => h.toLowerCase());
   const find = (...keys: string[]) => header.findIndex((h) => keys.some((k) => h.includes(k)));
   const idx = {
     partNo: find("part", "sku", "code"),
@@ -93,8 +108,7 @@ function parseDelimitedOrder(text: string): ParsedOrder {
   if (idx.qty === -1) warnings.push("No 'quantity' column found — lines without a recognisable qty will be skipped.");
 
   const lines: ParsedOrder["lines"] = [];
-  rows.slice(1).forEach((row, i) => {
-    const cells = row.split(delim).map((c) => c.trim());
+  cleaned.slice(1).forEach((cells, i) => {
     const partNo = cells[idx.partNo !== -1 ? idx.partNo : 0] || "";
     const qtyRaw = cells[idx.qty !== -1 ? idx.qty : -1];
     const qty = Number(qtyRaw);
@@ -113,6 +127,22 @@ function parseDelimitedOrder(text: string): ParsedOrder {
   return { lines, warnings };
 }
 
+/* Pasted or plain-text-uploaded CSV/TSV. */
+function parseDelimitedOrder(text: string): ParsedOrder {
+  const rows = text.split(/\r?\n/).map((r) => r.trim()).filter((r) => r.length > 0);
+  if (rows.length === 0) return { lines: [], warnings: ["No data rows found below the header."] };
+  const delim = rows[0].includes("\t") ? "\t" : ",";
+  return linesFromRows(rows.map((r) => r.split(delim)));
+}
+
+/* .xls / .xlsx uploads — parsed client-side, no server round trip needed. */
+function parseWorkbook(data: ArrayBuffer): ParsedOrder {
+  const workbook = XLSX.read(data, { type: "array" });
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1, blankrows: false, defval: "" });
+  return linesFromRows(rows.map((r) => r.map((c) => String(c))));
+}
+
 /* ------------------------- Shell --------------------------- */
 
 const ROLE_TABS = [
@@ -120,27 +150,44 @@ const ROLE_TABS = [
   { id: "jason", label: "Jason", tag: "Master · Border" },
   { id: "packer", label: "Packing crew", tag: "Border · blind" },
   { id: "receiver", label: "Goods in", tag: "DRC · blind" },
+  { id: "setup", label: "Setup", tag: "Admin" },
 ];
 
 /* Demo-only access codes for the two master roles. This is a client-side
    gate for walkthroughs — the code ships in the bundle, so it is NOT real
    security. Production access control has to happen server-side. */
-const MASTER_PINS: Record<string, string> = { drc: "1287", jason: "2471" };
+const MASTER_PINS: Record<string, string> = { drc: "1287", jason: "2471", setup: "1287" };
 
-export default function OrderTracker({ initialOrders }: { initialOrders: OrdersMap }) {
+export default function OrderTracker({ initialOrders, initialPeople, initialRecipients }: {
+  initialOrders: OrdersMap;
+  initialPeople: Person[];
+  initialRecipients: NotifyRecipient[];
+}) {
   const [orders, setOrders] = useState<OrdersMap>(initialOrders);
+  const [people, setPeople] = useState<Person[]>(initialPeople);
+  const [recipients, setRecipients] = useState<NotifyRecipient[]>(initialRecipients);
   const [activeOrderNo, setActiveOrderNo] = useState(() => Object.keys(initialOrders)[0] || "");
   const [role, setRole] = useState("packer");
-  const [unlocked, setUnlocked] = useState<Record<string, boolean>>({ drc: false, jason: false });
+  const [unlocked, setUnlocked] = useState<Record<string, boolean>>({ drc: false, jason: false, setup: false });
   const [pendingRole, setPendingRole] = useState<string | null>(null);
   const order = orders[activeOrderNo];
+
+  const packerNames = people.filter((p) => p.role === "packer").map((p) => p.name);
+  const receiverNames = people.filter((p) => p.role === "receiver").map((p) => p.name);
 
   function mergeOrder(updated: Order) {
     setOrders((prev) => ({ ...prev, [updated.orderNo]: updated }));
   }
+  function mergeOrders(updated: Order[]) {
+    setOrders((prev) => {
+      const next = { ...prev };
+      updated.forEach((o) => { next[o.orderNo] = o; });
+      return next;
+    });
+  }
 
   function requestRole(id: string) {
-    if ((id === "drc" || id === "jason") && !unlocked[id]) {
+    if ((id === "drc" || id === "jason" || id === "setup") && !unlocked[id]) {
       setPendingRole(id);
     } else {
       setRole(id);
@@ -170,27 +217,61 @@ export default function OrderTracker({ initialOrders }: { initialOrders: OrdersM
     setActiveOrderNo(updated.orderNo);
   }
 
-  async function handleStartDelivery(carrier: string, docket: string) {
-    const updated = await startDelivery(activeOrderNo, carrier, docket);
-    mergeOrder(updated);
+  async function handleStartRun(orderNos: string[], carrier: string, docket: string) {
+    const updated = await startRun(orderNos, carrier, docket);
+    mergeOrders(updated);
     return updated;
   }
 
-  async function handleSubmitDispatch(deliveryId: string, by: string, counts: CountMap) {
-    const updated = await submitDispatch(activeOrderNo, deliveryId, by, counts);
-    mergeOrder(updated);
+  async function handleSubmitRunDispatch(entries: { orderNo: string; deliveryId: string; counts: CountMap }[], by: string) {
+    const updated = await submitRunDispatch(entries, by);
+    mergeOrders(updated);
     return updated;
   }
 
-  async function handleSubmitReceipt(deliveryId: string, by: string, counts: CountMap) {
-    const updated = await submitReceipt(activeOrderNo, deliveryId, by, counts);
-    mergeOrder(updated);
+  async function handleSubmitRunReceipt(entries: { orderNo: string; deliveryId: string; counts: CountMap }[], by: string) {
+    const updated = await submitRunReceipt(entries, by);
+    mergeOrders(updated);
     return updated;
   }
 
   async function handleUpdateJasonQty(lineId: string, qty: number | null) {
     const updated = await updateJasonQty(activeOrderNo, lineId, qty);
     mergeOrder(updated);
+  }
+
+  async function handleUpdateLineQty(lineId: string, qty: number) {
+    const updated = await updateLineQty(activeOrderNo, lineId, qty);
+    mergeOrder(updated);
+  }
+
+  async function handleAcceptOverSupply(lineId: string) {
+    const updated = await acceptOverSupply(activeOrderNo, lineId);
+    mergeOrder(updated);
+  }
+
+  async function handleRequestPoIncrease(lineId: string) {
+    await requestPoIncrease(activeOrderNo, lineId);
+  }
+
+  async function handleAddPerson(name: string, personRole: PersonRole) {
+    const updated = await addPerson(name, personRole);
+    setPeople(updated);
+  }
+
+  async function handleRemovePerson(id: string) {
+    const updated = await removePerson(id);
+    setPeople(updated);
+  }
+
+  async function handleAddRecipient(email: string, notifyDispatch: boolean, notifyDiscrepancy: boolean) {
+    const updated = await addRecipient(email, notifyDispatch, notifyDiscrepancy);
+    setRecipients(updated);
+  }
+
+  async function handleRemoveRecipient(id: string) {
+    const updated = await removeRecipient(id);
+    setRecipients(updated);
   }
 
   return (
@@ -217,24 +298,57 @@ export default function OrderTracker({ initialOrders }: { initialOrders: OrdersM
               onCreateManual={handleCreateManual}
               onCreateImport={handleCreateImport}
             />
-            {order && <MasterView order={order} viewer="drc" onUpdateJasonQty={handleUpdateJasonQty} />}
+            {order && (
+              <MasterView
+                order={order}
+                viewer="drc"
+                onUpdateJasonQty={handleUpdateJasonQty}
+                onUpdateLineQty={handleUpdateLineQty}
+                onAcceptOverSupply={handleAcceptOverSupply}
+                onRequestPoIncrease={handleRequestPoIncrease}
+              />
+            )}
           </>
         )}
         {role === "jason" && (order ? (
-          <MasterView order={order} viewer="jason" onUpdateJasonQty={handleUpdateJasonQty} />
+          <MasterView
+            order={order}
+            viewer="jason"
+            onUpdateJasonQty={handleUpdateJasonQty}
+            onUpdateLineQty={handleUpdateLineQty}
+            onAcceptOverSupply={handleAcceptOverSupply}
+            onRequestPoIncrease={handleRequestPoIncrease}
+          />
         ) : (
           <EmptyState />
         ))}
-        {role === "packer" && (order ? (
-          <PackingView order={order} onStartDelivery={handleStartDelivery} onSubmitDispatch={handleSubmitDispatch} />
-        ) : (
-          <EmptyState />
-        ))}
-        {role === "receiver" && (order ? (
-          <ReceivingView order={order} onSubmitReceipt={handleSubmitReceipt} />
-        ) : (
-          <EmptyState />
-        ))}
+        {role === "packer" && (
+          <PackingView
+            orders={orders}
+            activeOrderNo={activeOrderNo}
+            packerNames={packerNames.length > 0 ? packerNames : DEFAULT_PACKERS}
+            onStartRun={handleStartRun}
+            onSubmitRun={handleSubmitRunDispatch}
+          />
+        )}
+        {role === "receiver" && (
+          <ReceivingView
+            orders={orders}
+            activeOrderNo={activeOrderNo}
+            receiverNames={receiverNames.length > 0 ? receiverNames : DEFAULT_RECEIVERS}
+            onSubmitRun={handleSubmitRunReceipt}
+          />
+        )}
+        {role === "setup" && (
+          <SetupView
+            people={people}
+            recipients={recipients}
+            onAddPerson={handleAddPerson}
+            onRemovePerson={handleRemovePerson}
+            onAddRecipient={handleAddRecipient}
+            onRemoveRecipient={handleRemoveRecipient}
+          />
+        )}
       </main>
 
       {pendingRole && (
@@ -259,7 +373,7 @@ function EmptyState() {
 function AccessGateModal({ roleId, onCancel, onUnlock }: { roleId: string; onCancel: () => void; onUnlock: () => void }) {
   const [pin, setPin] = useState("");
   const [error, setError] = useState(false);
-  const name = roleId === "drc" ? "DRC" : "Jason";
+  const name = roleId === "drc" ? "DRC" : roleId === "setup" ? "Setup" : "Jason";
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -331,12 +445,12 @@ function TopBar({ orders, activeOrderNo, setActiveOrderNo, role, requestRole, un
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            {(role === "drc" || role === "jason") && (
+            {(role === "drc" || role === "jason" || role === "setup") && (
               <button onClick={() => onLock(role)} style={{
                 background: "transparent", border: `1px solid ${T.slateLine}`, color: "#fff",
                 borderRadius: 6, padding: "7px 12px", fontSize: 11.5, cursor: "pointer",
               }}>
-                Lock {role === "drc" ? "DRC" : "Jason's"} view
+                Lock {role === "drc" ? "DRC" : role === "setup" ? "Setup" : "Jason's"} view
               </button>
             )}
             <select
@@ -358,7 +472,7 @@ function TopBar({ orders, activeOrderNo, setActiveOrderNo, role, requestRole, un
         <div style={{ display: "flex", gap: 4, marginTop: 18, overflowX: "auto" }}>
           {ROLE_TABS.map((r) => {
             const active = role === r.id;
-            const isMaster = r.id === "drc" || r.id === "jason";
+            const isMaster = r.id === "drc" || r.id === "jason" || r.id === "setup";
             const isLocked = isMaster && !unlocked[r.id];
             return (
               <button
@@ -402,15 +516,19 @@ function LockGlyph({ color }: { color: string }) {
 
 /* ------------------------- Master view --------------------------- */
 
-function MasterView({ order, viewer, onUpdateJasonQty }: {
+function MasterView({ order, viewer, onUpdateJasonQty, onUpdateLineQty, onAcceptOverSupply, onRequestPoIncrease }: {
   order: Order;
   viewer: string;
   onUpdateJasonQty: (lineId: string, qty: number | null) => void;
+  onUpdateLineQty: (lineId: string, qty: number) => void;
+  onAcceptOverSupply: (lineId: string) => void;
+  onRequestPoIncrease: (lineId: string) => void;
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const recon = lineReconciliation(order);
   const alerts = classifyAlerts(order);
   const isJason = viewer === "jason";
+  const isDrc = viewer === "drc";
 
   return (
     <div>
@@ -434,6 +552,7 @@ function MasterView({ order, viewer, onUpdateJasonQty }: {
             {recon.map((l) => {
               const status = statusFor(l);
               const isOpen = expanded === l.id;
+              const isOverSupplied = l.backOrder < 0 && !l.overSupplyAccepted;
               return (
                 <React.Fragment key={l.id}>
                   <tr
@@ -445,7 +564,9 @@ function MasterView({ order, viewer, onUpdateJasonQty }: {
                       <div style={{ fontSize: 11.5, color: T.faint }}>{l.desc}</div>
                     </td>
                     <td style={{ padding: "10px 14px", fontSize: 12, color: T.steel }}>{l.colour}</td>
-                    <td style={{ padding: "10px 14px", fontFamily: font.mono }}>{l.qtyOrdered}</td>
+                    <td style={{ padding: "10px 14px" }}>
+                      <QtyEditCell qty={l.qtyOrdered} editable={isDrc} onCommit={(qty) => onUpdateLineQty(l.id, qty)} />
+                    </td>
                     <td style={{ padding: "10px 14px" }}>
                       <JasonQtyCell line={l} editable={isJason} onCommit={(qty) => onUpdateJasonQty(l.id, qty)} />
                     </td>
@@ -456,6 +577,31 @@ function MasterView({ order, viewer, onUpdateJasonQty }: {
                     </td>
                     <td style={{ padding: "10px 14px" }}><Pill {...status} /></td>
                   </tr>
+                  {isOverSupplied && (
+                    <tr>
+                      <td colSpan={8} style={{ padding: "0 14px 12px", background: "#FAFBFC" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", padding: "10px 12px", background: T.flagSoft, borderRadius: 8 }}>
+                          <span style={{ fontSize: 12, color: T.flag }}>
+                            {Math.abs(l.backOrder)} more dispatched than ordered — request a PO increase, or accept it as a no-charge over-supply.
+                          </span>
+                          <div style={{ display: "flex", gap: 6, marginLeft: "auto" }}>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); onRequestPoIncrease(l.id); }}
+                              style={{ ...secondaryBtn, padding: "6px 10px", fontSize: 11.5 }}
+                            >
+                              Request PO increase
+                            </button>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); onAcceptOverSupply(l.id); }}
+                              style={{ ...primaryBtn, padding: "6px 10px", fontSize: 11.5 }}
+                            >
+                              Accept as no-charge
+                            </button>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
                   {isOpen && (
                     <tr>
                       <td colSpan={8} style={{ padding: "0 14px 14px", background: "#FAFBFC" }}>
@@ -475,9 +621,44 @@ function MasterView({ order, viewer, onUpdateJasonQty }: {
         sees the complete picture — ordered, dispatched and received —
         exactly as agreed. Packers and goods-in never see the numbers they&apos;re checked against.
         {isJason ? " Jason count is your own tally of what the order should be — edit it inline, it doesn't change the PO." : ""}
+        {isDrc ? " Ordered qty is editable here — use it to apply an agreed PO increase." : ""}
         {" "}Click any row for its per-delivery breakdown.
       </p>
     </div>
+  );
+}
+
+function QtyEditCell({ qty, editable, onCommit }: {
+  qty: number;
+  editable: boolean;
+  onCommit: (qty: number) => void;
+}) {
+  const [value, setValue] = useState(() => String(qty));
+  const [synced, setSynced] = useState(qty);
+
+  if (qty !== synced) {
+    setSynced(qty);
+    setValue(String(qty));
+  }
+
+  if (!editable) {
+    return <span style={{ fontFamily: font.mono }}>{qty}</span>;
+  }
+
+  return (
+    <input
+      type="number"
+      min="0"
+      value={value}
+      onClick={(e) => e.stopPropagation()}
+      onChange={(e) => setValue(e.target.value)}
+      onBlur={() => {
+        const num = Number(value);
+        if (value.trim() !== "" && !Number.isNaN(num) && num !== qty) onCommit(num);
+        else setValue(String(qty));
+      }}
+      style={{ ...inputStyle, width: 70, margin: 0, textAlign: "right", fontFamily: font.mono }}
+    />
   );
 }
 
@@ -518,6 +699,7 @@ function JasonQtyCell({ line, editable, onCommit }: {
 
 function statusFor(l: ReconLine): { label: string; bg: string; fg: string } {
   if (l.transitDelta && l.transitDelta !== 0) return { label: "Transit loss", bg: T.flagSoft, fg: T.flag };
+  if (l.backOrder < 0 && l.overSupplyAccepted) return { label: "Over-supply accepted", bg: T.okSoft, fg: T.ok };
   if (l.backOrder < 0) return { label: "Over-dispatched", bg: T.flagSoft, fg: T.flag };
   if (l.dispatched === 0) return { label: "Not started", bg: T.lineSoft, fg: T.steel };
   if (l.backOrder > 0) return { label: "Back order", bg: T.pendingSoft, fg: T.pending };
@@ -723,14 +905,24 @@ function OrderingView({ orders, activeOrderNo, setActiveOrderNo, onCreateManual,
     const file = e.target.files?.[0];
     if (!file) return;
     setFileName(file.name);
-    if (!importOrderNo) setImportOrderNo(file.name.replace(/\.(csv|txt|tsv)$/i, ""));
+    if (!importOrderNo) setImportOrderNo(file.name.replace(/\.(csv|txt|tsv|xlsx|xls)$/i, ""));
+
+    const isSpreadsheet = /\.(xlsx|xls)$/i.test(file.name);
     const reader = new FileReader();
-    reader.onload = (evt) => {
-      const text = String(evt.target?.result);
-      setRawText(text);
-      setPreview(parseDelimitedOrder(text));
-    };
-    reader.readAsText(file);
+    if (isSpreadsheet) {
+      reader.onload = (evt) => {
+        setRawText("");
+        setPreview(parseWorkbook(evt.target?.result as ArrayBuffer));
+      };
+      reader.readAsArrayBuffer(file);
+    } else {
+      reader.onload = (evt) => {
+        const text = String(evt.target?.result);
+        setRawText(text);
+        setPreview(parseDelimitedOrder(text));
+      };
+      reader.readAsText(file);
+    }
   }
 
   function handlePasteChange(val: string) {
@@ -820,8 +1012,8 @@ function OrderingView({ orders, activeOrderNo, setActiveOrderNo, onCreateManual,
           <label style={labelStyle}>Order number</label>
           <input placeholder="e.g. BSSP-102" value={importOrderNo} onChange={(e) => setImportOrderNo(e.target.value)} style={inputStyle} />
 
-          <label style={labelStyle}>Upload a .csv export</label>
-          <input type="file" accept=".csv,.txt,.tsv" onChange={handleFile}
+          <label style={labelStyle}>Upload a .csv or .xlsx export</label>
+          <input type="file" accept=".csv,.txt,.tsv,.xlsx,.xls" onChange={handleFile}
             style={{ ...inputStyle, padding: "7px 10px" }} />
           {fileName && <div style={{ fontSize: 11.5, color: T.faint, marginTop: 4 }}>Loaded {fileName}</div>}
 
@@ -878,36 +1070,194 @@ function OrderingView({ orders, activeOrderNo, setActiveOrderNo, onCreateManual,
   );
 }
 
+/* ------------------------- Setup (admin) --------------------------- */
+
+function SetupView({ people, recipients, onAddPerson, onRemovePerson, onAddRecipient, onRemoveRecipient }: {
+  people: Person[];
+  recipients: NotifyRecipient[];
+  onAddPerson: (name: string, role: PersonRole) => Promise<void>;
+  onRemovePerson: (id: string) => Promise<void>;
+  onAddRecipient: (email: string, notifyDispatch: boolean, notifyDiscrepancy: boolean) => Promise<void>;
+  onRemoveRecipient: (id: string) => Promise<void>;
+}) {
+  const [name, setName] = useState("");
+  const [personRole, setPersonRole] = useState<PersonRole>("packer");
+  const [personBusy, setPersonBusy] = useState(false);
+  const [personError, setPersonError] = useState<string | null>(null);
+
+  const [email, setEmail] = useState("");
+  const [notifyDispatch, setNotifyDispatch] = useState(true);
+  const [notifyDiscrepancy, setNotifyDiscrepancy] = useState(true);
+  const [recipientBusy, setRecipientBusy] = useState(false);
+  const [recipientError, setRecipientError] = useState<string | null>(null);
+
+  async function submitPerson() {
+    setPersonError(null);
+    setPersonBusy(true);
+    try {
+      await onAddPerson(name, personRole);
+      setName("");
+    } catch (err) {
+      setPersonError(err instanceof Error ? err.message : "Couldn't add that person.");
+    } finally {
+      setPersonBusy(false);
+    }
+  }
+
+  async function submitRecipient() {
+    setRecipientError(null);
+    setRecipientBusy(true);
+    try {
+      await onAddRecipient(email, notifyDispatch, notifyDiscrepancy);
+      setEmail("");
+    } catch (err) {
+      setRecipientError(err instanceof Error ? err.message : "Couldn't add that recipient.");
+    } finally {
+      setRecipientBusy(false);
+    }
+  }
+
+  const packers = people.filter((p) => p.role === "packer");
+  const receivers = people.filter((p) => p.role === "receiver");
+
+  return (
+    <div>
+      <SectionHeader title="Setup" note="Manage who shows up in the Counted-by dropdowns, and who gets email notifications." />
+
+      <div style={{ background: T.panel, border: `1px solid ${T.line}`, borderRadius: 10, padding: 18, marginBottom: 20 }}>
+        <div style={{ fontFamily: font.display, fontWeight: 700, fontSize: 14, marginBottom: 12 }}>People</div>
+        <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr auto", gap: 8 }}>
+          <input placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} style={inputStyle} />
+          <select value={personRole} onChange={(e) => setPersonRole(e.target.value as PersonRole)} style={inputStyle}>
+            <option value="packer">Packer</option>
+            <option value="receiver">Receiver</option>
+          </select>
+          <button onClick={submitPerson} disabled={personBusy} style={{ ...primaryBtn, opacity: personBusy ? 0.6 : 1, marginTop: 4 }}>
+            {personBusy ? "Adding…" : "+ Add"}
+          </button>
+        </div>
+        {personError && <div style={{ fontSize: 11.5, color: T.flag, marginTop: 8 }}>{personError}</div>}
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
+          <div>
+            <div style={{ fontSize: 10.5, color: T.faint, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 }}>Packers</div>
+            {packers.length === 0 && <div style={{ fontSize: 12, color: T.faint }}>None yet — using default names for now.</div>}
+            {packers.map((p) => (
+              <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderTop: `1px solid ${T.lineSoft}`, fontSize: 13 }}>
+                {p.name}
+                <button onClick={() => onRemovePerson(p.id)} style={{ ...secondaryBtn, padding: "3px 8px", fontSize: 11 }}>Remove</button>
+              </div>
+            ))}
+          </div>
+          <div>
+            <div style={{ fontSize: 10.5, color: T.faint, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 }}>Receivers</div>
+            {receivers.length === 0 && <div style={{ fontSize: 12, color: T.faint }}>None yet — using default names for now.</div>}
+            {receivers.map((p) => (
+              <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderTop: `1px solid ${T.lineSoft}`, fontSize: 13 }}>
+                {p.name}
+                <button onClick={() => onRemovePerson(p.id)} style={{ ...secondaryBtn, padding: "3px 8px", fontSize: 11 }}>Remove</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ background: T.panel, border: `1px solid ${T.line}`, borderRadius: 10, padding: 18 }}>
+        <div style={{ fontFamily: font.display, fontWeight: 700, fontSize: 14, marginBottom: 12 }}>Notification recipients</div>
+        <div style={{ display: "grid", gridTemplateColumns: "2fr auto auto auto", gap: 8, alignItems: "center" }}>
+          <input placeholder="name@drcswitchboards.com.au" value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} />
+          <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 4, marginTop: 4 }}>
+            <input type="checkbox" checked={notifyDispatch} onChange={(e) => setNotifyDispatch(e.target.checked)} /> New despatch
+          </label>
+          <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 4, marginTop: 4 }}>
+            <input type="checkbox" checked={notifyDiscrepancy} onChange={(e) => setNotifyDiscrepancy(e.target.checked)} /> Discrepancy
+          </label>
+          <button onClick={submitRecipient} disabled={recipientBusy} style={{ ...primaryBtn, opacity: recipientBusy ? 0.6 : 1, marginTop: 4 }}>
+            {recipientBusy ? "Adding…" : "+ Add"}
+          </button>
+        </div>
+        {recipientError && <div style={{ fontSize: 11.5, color: T.flag, marginTop: 8 }}>{recipientError}</div>}
+
+        <div style={{ marginTop: 14 }}>
+          {recipients.length === 0 && (
+            <div style={{ fontSize: 12, color: T.faint }}>
+              None yet — falling back to the NOTIFY_DISPATCH_EMAILS / NOTIFY_DISCREPANCY_EMAILS environment variables.
+            </div>
+          )}
+          {recipients.map((r) => (
+            <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderTop: `1px solid ${T.lineSoft}`, fontSize: 13 }}>
+              <div>
+                <div>{r.email}</div>
+                <div style={{ fontSize: 11, color: T.faint }}>
+                  {[r.notifyDispatch && "New despatch", r.notifyDiscrepancy && "Discrepancy"].filter(Boolean).join(" · ") || "No alerts selected"}
+                </div>
+              </div>
+              <button onClick={() => onRemoveRecipient(r.id)} style={{ ...secondaryBtn, padding: "3px 8px", fontSize: 11 }}>Remove</button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ------------------------- Packing view (blind) --------------------------- */
 
-function PackingView({ order, onStartDelivery, onSubmitDispatch }: {
-  order: Order;
-  onStartDelivery: (carrier: string, docket: string) => Promise<Order>;
-  onSubmitDispatch: (deliveryId: string, by: string, counts: CountMap) => Promise<Order>;
+function PackingView({ orders, activeOrderNo, packerNames, onStartRun, onSubmitRun }: {
+  orders: OrdersMap;
+  activeOrderNo: string;
+  packerNames: string[];
+  onStartRun: (orderNos: string[], carrier: string, docket: string) => Promise<Order[]>;
+  onSubmitRun: (entries: { orderNo: string; deliveryId: string; counts: CountMap }[], by: string) => Promise<Order[]>;
 }) {
-  const [selectedDeliveryId, setSelectedDeliveryId] = useState<string | null>(null);
+  const order = orders[activeOrderNo];
+  const orderNos = Object.keys(orders);
+
   const [creating, setCreating] = useState(false);
-  const [carrier, setCarrier] = useState("BSSP Truck");
+  const [pickedOrderNos, setPickedOrderNos] = useState<string[]>([]);
+  const [carrier, setCarrier] = useState(CARRIERS[0]);
+  const [carrierOther, setCarrierOther] = useState("");
   const [docket, setDocket] = useState("");
+  const [runEntries, setRunEntries] = useState<{ orderNo: string; deliveryId: string }[] | null>(null);
   const [counts, setCounts] = useState<CountMap>({});
-  const [countedBy, setCountedBy] = useState(PACKERS[0]);
-  const [submitted, setSubmitted] = useState(false);
+  const [countedBy, setCountedBy] = useState(packerNames[0] ?? "");
+  const [submitted, setSubmitted] = useState<{ orderNo: string; runNo: number }[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const openDeliveries = order.deliveries.filter((d) => d.status === "draft");
-  const editing = order.deliveries.find((d) => d.id === selectedDeliveryId);
+  const openDeliveries = order ? order.deliveries.filter((d) => d.status === "draft") : [];
 
-  async function startNewDelivery() {
+  function openCreating() {
+    setPickedOrderNos(activeOrderNo ? [activeOrderNo] : []);
+    setCarrier(CARRIERS[0]);
+    setCarrierOther("");
+    setDocket("");
+    setError(null);
+    setCreating(true);
+  }
+
+  function togglePicked(no: string) {
+    setPickedOrderNos((prev) => (prev.includes(no) ? prev.filter((n) => n !== no) : [...prev, no]));
+  }
+
+  async function startNewRun() {
+    if (pickedOrderNos.length === 0) {
+      setError("Pick at least one order.");
+      return;
+    }
     setError(null);
     setBusy(true);
     try {
-      const updated = await onStartDelivery(carrier, docket);
-      const newest = updated.deliveries.reduce((a: Delivery, b: Delivery) => (b.runNo > a.runNo ? b : a));
-      setSelectedDeliveryId(newest.id);
+      const carrierName = carrier === "Other" ? carrierOther || "Other" : carrier;
+      const updated = await onStartRun(pickedOrderNos, carrierName, docket);
+      const entries = updated.map((o) => {
+        const newest = o.deliveries.reduce((a, b) => (b.runNo > a.runNo ? b : a));
+        return { orderNo: o.orderNo, deliveryId: newest.id };
+      });
+      setRunEntries(entries);
       setCreating(false);
       setCounts({});
-      setSubmitted(false);
+      setSubmitted(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't start a new dispatch.");
     } finally {
@@ -915,13 +1265,37 @@ function PackingView({ order, onStartDelivery, onSubmitDispatch }: {
     }
   }
 
+  function continueDraft(deliveryId: string) {
+    setRunEntries([{ orderNo: activeOrderNo, deliveryId }]);
+    setCounts({});
+    setSubmitted(null);
+  }
+
+  function reset() {
+    setRunEntries(null);
+    setSubmitted(null);
+  }
+
   async function submit() {
-    if (!editing) return;
+    if (!runEntries) return;
     setError(null);
     setBusy(true);
     try {
-      await onSubmitDispatch(editing.id, countedBy, counts);
-      setSubmitted(true);
+      const entries = runEntries.map((e) => {
+        const o = orders[e.orderNo];
+        const lineIds = new Set(o.lines.map((l) => l.id));
+        const entryCounts: CountMap = {};
+        Object.entries(counts).forEach(([lineId, qty]) => {
+          if (lineIds.has(lineId)) entryCounts[lineId] = qty;
+        });
+        return { orderNo: e.orderNo, deliveryId: e.deliveryId, counts: entryCounts };
+      });
+      const updated = await onSubmitRun(entries, countedBy);
+      setSubmitted(entries.map((e) => {
+        const o = updated.find((u) => u.orderNo === e.orderNo)!;
+        const d = o.deliveries.find((dd) => dd.id === e.deliveryId)!;
+        return { orderNo: e.orderNo, runNo: d.runNo };
+      }));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't submit this dispatch.");
     } finally {
@@ -933,14 +1307,16 @@ function PackingView({ order, onStartDelivery, onSubmitDispatch }: {
     <div>
       <SectionHeader title="Border packing — blind count" note="You see part numbers only. Ordered quantities and back orders are hidden — count exactly what leaves the bench." />
 
-      {!selectedDeliveryId && !creating && (
+      {!runEntries && !creating && (
         <div style={{ background: T.panel, border: `1px solid ${T.line}`, borderRadius: 10, padding: 18 }}>
-          <div style={{ fontSize: 13, marginBottom: 12 }}>Start a new delivery run for <strong>{order.orderNo}</strong>, or continue one in progress.</div>
-          <button onClick={() => setCreating(true)} style={primaryBtn}>+ New dispatch</button>
+          <div style={{ fontSize: 13, marginBottom: 12 }}>
+            {order ? <>Start a new delivery run for <strong>{order.orderNo}</strong> — or add other orders to the same run — or continue one in progress.</> : "Pick an order from the top bar to get started."}
+          </div>
+          <button onClick={openCreating} style={primaryBtn}>+ New dispatch</button>
           {openDeliveries.length > 0 && (
             <div style={{ marginTop: 14 }}>
               {openDeliveries.map((d) => (
-                <div key={d.id} onClick={() => setSelectedDeliveryId(d.id)} style={{ padding: "10px 0", borderTop: `1px solid ${T.lineSoft}`, cursor: "pointer", fontSize: 13 }}>
+                <div key={d.id} onClick={() => continueDraft(d.id)} style={{ padding: "10px 0", borderTop: `1px solid ${T.lineSoft}`, cursor: "pointer", fontSize: 13 }}>
                   Run {String(d.runNo).padStart(2, "0")} — {d.carrier} (in progress)
                 </div>
               ))}
@@ -951,45 +1327,70 @@ function PackingView({ order, onStartDelivery, onSubmitDispatch }: {
 
       {creating && (
         <div style={{ background: T.panel, border: `1px solid ${T.line}`, borderRadius: 10, padding: 18 }}>
-          <div style={{ fontFamily: font.display, fontWeight: 700, fontSize: 14, marginBottom: 12 }}>New dispatch — {order.orderNo}</div>
+          <div style={{ fontFamily: font.display, fontWeight: 700, fontSize: 14, marginBottom: 12 }}>New dispatch</div>
+
+          <label style={labelStyle}>Orders on this run</label>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+            {orderNos.map((no) => (
+              <label key={no} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
+                <input type="checkbox" checked={pickedOrderNos.includes(no)} onChange={() => togglePicked(no)} />
+                {no}
+              </label>
+            ))}
+          </div>
+
           <label style={labelStyle}>Carrier</label>
-          <input value={carrier} onChange={(e) => setCarrier(e.target.value)} style={inputStyle} />
+          <select value={carrier} onChange={(e) => setCarrier(e.target.value)} style={inputStyle}>
+            {CARRIERS.map((c) => <option key={c}>{c}</option>)}
+          </select>
+          {carrier === "Other" && (
+            <input value={carrierOther} onChange={(e) => setCarrierOther(e.target.value)} placeholder="Carrier name" style={inputStyle} />
+          )}
+
           <label style={labelStyle}>Docket number (optional)</label>
           <input value={docket} onChange={(e) => setDocket(e.target.value)} style={inputStyle} placeholder="—" />
           {error && <div style={{ fontSize: 11.5, color: T.flag, marginTop: 10 }}>{error}</div>}
           <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
             <button onClick={() => setCreating(false)} style={secondaryBtn}>Cancel</button>
-            <button onClick={startNewDelivery} disabled={busy} style={{ ...primaryBtn, opacity: busy ? 0.6 : 1 }}>
+            <button onClick={startNewRun} disabled={busy} style={{ ...primaryBtn, opacity: busy ? 0.6 : 1 }}>
               {busy ? "Starting…" : "Start crate count"}
             </button>
           </div>
         </div>
       )}
 
-      {editing && !submitted && (
+      {runEntries && !submitted && (
         <div style={{ background: T.panel, border: `1px solid ${T.line}`, borderRadius: 10, padding: 18 }}>
-          <div style={{ fontFamily: font.display, fontWeight: 700, fontSize: 14, marginBottom: 4 }}>
-            Run {String(editing.runNo).padStart(2, "0")} — {editing.carrier}
-          </div>
-          <div style={{ fontSize: 11.5, color: T.faint, marginBottom: 14 }}>Docket {editing.docket}</div>
-          {order.lines.map((l) => (
-            <div key={l.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderTop: `1px solid ${T.lineSoft}` }}>
-              <div>
-                <div style={{ fontFamily: font.mono, fontWeight: 600, fontSize: 13 }}>{l.partNo}</div>
-                <div style={{ fontSize: 11.5, color: T.faint }}>{l.desc}</div>
+          {runEntries.map((entry) => {
+            const o = orders[entry.orderNo];
+            const d = o?.deliveries.find((dd) => dd.id === entry.deliveryId);
+            if (!o || !d) return null;
+            return (
+              <div key={entry.deliveryId} style={{ marginBottom: 18 }}>
+                <div style={{ fontFamily: font.display, fontWeight: 700, fontSize: 14, marginBottom: 4 }}>
+                  {runEntries.length > 1 ? `${o.orderNo} — ` : ""}Run {String(d.runNo).padStart(2, "0")} — {d.carrier}
+                </div>
+                <div style={{ fontSize: 11.5, color: T.faint, marginBottom: 10 }}>Docket {d.docket}</div>
+                {o.lines.map((l) => (
+                  <div key={l.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderTop: `1px solid ${T.lineSoft}` }}>
+                    <div>
+                      <div style={{ fontFamily: font.mono, fontWeight: 600, fontSize: 13 }}>{l.partNo}</div>
+                      <div style={{ fontSize: 11.5, color: T.faint }}>{l.desc}</div>
+                    </div>
+                    <TallyQtyInput key={`${d.id}-${l.id}`} placeholder="Qty packed"
+                      onChange={(total) => setCounts((prev) => ({ ...prev, [l.id]: total }))} />
+                  </div>
+                ))}
               </div>
-              <input type="number" min="0" placeholder="Qty packed" value={counts[l.id] ?? ""}
-                onChange={(e) => setCounts({ ...counts, [l.id]: Number(e.target.value) })}
-                style={{ ...inputStyle, width: 96, textAlign: "right", fontFamily: font.mono, margin: 0 }} />
-            </div>
-          ))}
-          <label style={{ ...labelStyle, marginTop: 16 }}>Counted by</label>
+            );
+          })}
+          <label style={{ ...labelStyle, marginTop: 4 }}>Counted by</label>
           <select value={countedBy} onChange={(e) => setCountedBy(e.target.value)} style={inputStyle}>
-            {PACKERS.map((p) => <option key={p}>{p}</option>)}
+            {packerNames.map((p) => <option key={p}>{p}</option>)}
           </select>
           {error && <div style={{ fontSize: 11.5, color: T.flag, marginTop: 10 }}>{error}</div>}
           <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
-            <button onClick={() => setSelectedDeliveryId(null)} style={secondaryBtn}>Back</button>
+            <button onClick={reset} style={secondaryBtn}>Back</button>
             <button onClick={submit} disabled={busy} style={{ ...primaryBtn, opacity: busy ? 0.6 : 1 }}>
               {busy ? "Submitting…" : "Submit and lock"}
             </button>
@@ -997,9 +1398,70 @@ function PackingView({ order, onStartDelivery, onSubmitDispatch }: {
         </div>
       )}
 
-      {submitted && editing && (
-        <ConfirmBanner text={`Run ${String(editing.runNo).padStart(2, "0")} submitted and locked. It's now visible to DRC and Jason on the master ledger.`}
-          onDone={() => { setSelectedDeliveryId(null); setSubmitted(false); }} />
+      {submitted && (
+        <ConfirmBanner
+          text={`${submitted.map((s) => `${s.orderNo} run ${String(s.runNo).padStart(2, "0")}`).join(", ")} submitted and locked. It's now visible to DRC and Jason on the master ledger.`}
+          onDone={reset}
+        />
+      )}
+    </div>
+  );
+}
+
+/* Small "add multiple counts, they sum" input — for stock counted in layers
+   (e.g. different quantities on each level of a crate). Resets whenever its
+   `key` changes (callers key it per delivery+line so switching runs clears it). */
+function TallyQtyInput({ onChange, placeholder }: { onChange: (total: number) => void; placeholder: string }) {
+  const [entries, setEntries] = useState<number[]>([]);
+  const [draft, setDraft] = useState("");
+
+  function commitDraft() {
+    const n = Number(draft);
+    if (draft.trim() === "" || Number.isNaN(n)) return;
+    const next = [...entries, n];
+    setEntries(next);
+    setDraft("");
+    onChange(next.reduce((a, b) => a + b, 0));
+  }
+
+  function removeEntry(i: number) {
+    const next = entries.filter((_, idx) => idx !== i);
+    setEntries(next);
+    onChange(next.reduce((a, b) => a + b, 0));
+  }
+
+  const total = entries.reduce((a, b) => a + b, 0);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+      <div style={{ display: "flex", gap: 4 }}>
+        <input
+          type="number"
+          min="0"
+          placeholder={placeholder}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commitDraft();
+            }
+          }}
+          onBlur={commitDraft}
+          style={{ ...inputStyle, width: 90, textAlign: "right", fontFamily: font.mono, margin: 0 }}
+        />
+        <button type="button" onClick={commitDraft} style={{ ...secondaryBtn, padding: "6px 10px", fontSize: 12 }}>+</button>
+      </div>
+      {entries.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, justifyContent: "flex-end", maxWidth: 200 }}>
+          {entries.map((n, i) => (
+            <span key={i} onClick={() => removeEntry(i)} title="Click to remove"
+              style={{ fontFamily: font.mono, fontSize: 11, background: T.lineSoft, borderRadius: 4, padding: "2px 6px", cursor: "pointer" }}>
+              {n} ×
+            </span>
+          ))}
+          <span style={{ fontFamily: font.mono, fontWeight: 700, fontSize: 12 }}>= {total}</span>
+        </div>
       )}
     </div>
   );
@@ -1007,28 +1469,68 @@ function PackingView({ order, onStartDelivery, onSubmitDispatch }: {
 
 /* ------------------------- Receiving view (blind) --------------------------- */
 
-function ReceivingView({ order, onSubmitReceipt }: {
-  order: Order;
-  onSubmitReceipt: (deliveryId: string, by: string, counts: CountMap) => Promise<Order>;
+function ReceivingView({ orders, activeOrderNo, receiverNames, onSubmitRun }: {
+  orders: OrdersMap;
+  activeOrderNo: string;
+  receiverNames: string[];
+  onSubmitRun: (entries: { orderNo: string; deliveryId: string; counts: CountMap }[], by: string) => Promise<Order[]>;
 }) {
+  const order = orders[activeOrderNo];
   const [selectedDeliveryId, setSelectedDeliveryId] = useState<string | null>(null);
   const [counts, setCounts] = useState<CountMap>({});
-  const [countedBy, setCountedBy] = useState(RECEIVERS[0]);
-  const [submitted, setSubmitted] = useState(false);
+  const [countedBy, setCountedBy] = useState(receiverNames[0] ?? "");
+  const [submitted, setSubmitted] = useState<{ orderNo: string; runNo: number }[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const arrivable = order.deliveries.filter((d) => d.status === "dispatched");
-  const editing = order.deliveries.find((d) => d.id === selectedDeliveryId);
-  const linesInDelivery = editing ? order.lines.filter((l) => editing.dispatch?.counts[l.id] !== undefined) : [];
+  const arrivable = order ? order.deliveries.filter((d) => d.status === "dispatched") : [];
+  const selectedDelivery = order?.deliveries.find((d) => d.id === selectedDeliveryId);
+
+  // If this delivery is part of a multi-order run, pull in the sibling
+  // deliveries (other orders, same run) so they're received together too.
+  const runEntries: { orderNo: string; delivery: Delivery }[] = [];
+  if (selectedDelivery) {
+    if (selectedDelivery.runId) {
+      Object.values(orders).forEach((o) => {
+        o.deliveries.forEach((d) => {
+          if (d.runId === selectedDelivery.runId && d.status === "dispatched") runEntries.push({ orderNo: o.orderNo, delivery: d });
+        });
+      });
+    } else {
+      runEntries.push({ orderNo: activeOrderNo, delivery: selectedDelivery });
+    }
+  }
+
+  function select(deliveryId: string) {
+    setSelectedDeliveryId(deliveryId);
+    setCounts({});
+    setSubmitted(null);
+  }
+
+  function reset() {
+    setSelectedDeliveryId(null);
+    setSubmitted(null);
+  }
 
   async function submit() {
-    if (!editing) return;
+    if (runEntries.length === 0) return;
     setError(null);
     setBusy(true);
     try {
-      await onSubmitReceipt(editing.id, countedBy, counts);
-      setSubmitted(true);
+      const entries = runEntries.map(({ orderNo, delivery }) => {
+        const dispatchedIds = new Set(Object.keys(delivery.dispatch?.counts ?? {}));
+        const entryCounts: CountMap = {};
+        Object.entries(counts).forEach(([lineId, qty]) => {
+          if (dispatchedIds.has(lineId)) entryCounts[lineId] = qty;
+        });
+        return { orderNo, deliveryId: delivery.id, counts: entryCounts };
+      });
+      const updated = await onSubmitRun(entries, countedBy);
+      setSubmitted(entries.map((e) => {
+        const o = updated.find((u) => u.orderNo === e.orderNo)!;
+        const d = o.deliveries.find((dd) => dd.id === e.deliveryId)!;
+        return { orderNo: e.orderNo, runNo: d.runNo };
+      }));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't submit this receipt.");
     } finally {
@@ -1042,11 +1544,11 @@ function ReceivingView({ order, onSubmitReceipt }: {
 
       {!selectedDeliveryId && (
         <div style={{ background: T.panel, border: `1px solid ${T.line}`, borderRadius: 10, padding: 18 }}>
-          {arrivable.length === 0 ? (
-            <div style={{ fontSize: 13, color: T.faint }}>No deliveries currently in transit for {order.orderNo}.</div>
+          {!order || arrivable.length === 0 ? (
+            <div style={{ fontSize: 13, color: T.faint }}>No deliveries currently in transit{order ? ` for ${order.orderNo}` : ""}.</div>
           ) : (
             arrivable.map((d) => (
-              <div key={d.id} onClick={() => { setSelectedDeliveryId(d.id); setCounts({}); setSubmitted(false); }}
+              <div key={d.id} onClick={() => select(d.id)}
                 style={{ padding: "12px 0", borderTop: `1px solid ${T.lineSoft}`, cursor: "pointer", display: "flex", justifyContent: "space-between" }}>
                 <div style={{ fontSize: 13 }}>Run {String(d.runNo).padStart(2, "0")} — {d.carrier}</div>
                 <Pill label="Arrived, uncounted" bg={T.pendingSoft} fg={T.pending} />
@@ -1056,30 +1558,37 @@ function ReceivingView({ order, onSubmitReceipt }: {
         </div>
       )}
 
-      {editing && !submitted && (
+      {runEntries.length > 0 && !submitted && (
         <div style={{ background: T.panel, border: `1px solid ${T.line}`, borderRadius: 10, padding: 18 }}>
-          <div style={{ fontFamily: font.display, fontWeight: 700, fontSize: 14, marginBottom: 4 }}>
-            Run {String(editing.runNo).padStart(2, "0")} — {editing.carrier}
-          </div>
-          <div style={{ fontSize: 11.5, color: T.faint, marginBottom: 14 }}>Docket {editing.docket}. Pick the parts in this crate and count them.</div>
-          {linesInDelivery.map((l) => (
-            <div key={l.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderTop: `1px solid ${T.lineSoft}` }}>
-              <div>
-                <div style={{ fontFamily: font.mono, fontWeight: 600, fontSize: 13 }}>{l.partNo}</div>
-                <div style={{ fontSize: 11.5, color: T.faint }}>{l.desc}</div>
+          {runEntries.map(({ orderNo, delivery }) => {
+            const o = orders[orderNo];
+            const linesInDelivery = o.lines.filter((l) => delivery.dispatch?.counts[l.id] !== undefined);
+            return (
+              <div key={delivery.id} style={{ marginBottom: 18 }}>
+                <div style={{ fontFamily: font.display, fontWeight: 700, fontSize: 14, marginBottom: 4 }}>
+                  {runEntries.length > 1 ? `${orderNo} — ` : ""}Run {String(delivery.runNo).padStart(2, "0")} — {delivery.carrier}
+                </div>
+                <div style={{ fontSize: 11.5, color: T.faint, marginBottom: 10 }}>Docket {delivery.docket}. Pick the parts in this crate and count them.</div>
+                {linesInDelivery.map((l) => (
+                  <div key={l.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderTop: `1px solid ${T.lineSoft}` }}>
+                    <div>
+                      <div style={{ fontFamily: font.mono, fontWeight: 600, fontSize: 13 }}>{l.partNo}</div>
+                      <div style={{ fontSize: 11.5, color: T.faint }}>{l.desc}</div>
+                    </div>
+                    <TallyQtyInput key={`${delivery.id}-${l.id}`} placeholder="Qty received"
+                      onChange={(total) => setCounts((prev) => ({ ...prev, [l.id]: total }))} />
+                  </div>
+                ))}
               </div>
-              <input type="number" min="0" placeholder="Qty received" value={counts[l.id] ?? ""}
-                onChange={(e) => setCounts({ ...counts, [l.id]: Number(e.target.value) })}
-                style={{ ...inputStyle, width: 96, textAlign: "right", fontFamily: font.mono, margin: 0 }} />
-            </div>
-          ))}
-          <label style={{ ...labelStyle, marginTop: 16 }}>Counted by</label>
+            );
+          })}
+          <label style={{ ...labelStyle, marginTop: 4 }}>Counted by</label>
           <select value={countedBy} onChange={(e) => setCountedBy(e.target.value)} style={inputStyle}>
-            {RECEIVERS.map((p) => <option key={p}>{p}</option>)}
+            {receiverNames.map((p) => <option key={p}>{p}</option>)}
           </select>
           {error && <div style={{ fontSize: 11.5, color: T.flag, marginTop: 10 }}>{error}</div>}
           <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
-            <button onClick={() => setSelectedDeliveryId(null)} style={secondaryBtn}>Back</button>
+            <button onClick={reset} style={secondaryBtn}>Back</button>
             <button onClick={submit} disabled={busy} style={{ ...primaryBtn, opacity: busy ? 0.6 : 1 }}>
               {busy ? "Submitting…" : "Submit and lock"}
             </button>
@@ -1087,9 +1596,11 @@ function ReceivingView({ order, onSubmitReceipt }: {
         </div>
       )}
 
-      {submitted && editing && (
-        <ConfirmBanner text={`Run ${String(editing.runNo).padStart(2, "0")} receipt logged. Any mismatch is now pinned on the master ledger.`}
-          onDone={() => { setSelectedDeliveryId(null); setSubmitted(false); }} />
+      {submitted && (
+        <ConfirmBanner
+          text={`${submitted.map((s) => `${s.orderNo} run ${String(s.runNo).padStart(2, "0")}`).join(", ")} receipt logged. Any mismatch is now pinned on the master ledger.`}
+          onDone={reset}
+        />
       )}
     </div>
   );

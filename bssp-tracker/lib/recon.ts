@@ -34,7 +34,7 @@ export function deliveryDeltas(order: Order, lineId: string): DeliveryDelta[] {
 
 export function classifyAlerts(order: Order): Alerts {
   const recon = lineReconciliation(order);
-  const packing = recon.filter((l) => l.backOrder < 0);
+  const packing = recon.filter((l) => l.backOrder < 0 && !l.overSupplyAccepted);
   const backOrders = recon.filter((l) => l.backOrder > 0 && l.dispatched > 0);
   const notStarted = recon.filter((l) => l.dispatched === 0);
   const transit: TransitAlert[] = [];

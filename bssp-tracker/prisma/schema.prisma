@@ -35,8 +35,22 @@ model Line {
   // Jason's own count of what the order should be — entered independently on
   // the Border side, may legitimately differ from the PO qty Brett entered.
   jasonQty   Int?
+  // Jason (or DRC) has accepted an over-dispatch on this line as a no-charge
+  // over-supply rather than requesting a PO increase — suppresses the
+  // "over-dispatched" alert for this line going forward.
+  overSupplyAccepted Boolean @default(false)
 
   @@index([orderId])
+}
+
+// Purely a grouping key so one physical truck run can cover several orders'
+// deliveries at once (carrier/docket/counts still live on each Delivery —
+// this just ties them together for a combined packing/receiving flow and a
+// single notification email instead of one per order).
+model Run {
+  id         String     @id @default(cuid())
+  createdAt  DateTime   @default(now())
+  deliveries Delivery[]
 }
 
 model Delivery {
@@ -48,6 +62,9 @@ model Delivery {
   docket  String
   status  String // draft | dispatched | received
 
+  runId String?
+  run   Run?    @relation(fields: [runId], references: [id], onDelete: SetNull)
+
   // Blind counts, keyed by Line.id. Border can't see receiptCounts and DRC
   // goods-in can't see dispatchCounts until both sides have submitted.
   dispatchBy     String?
@@ -58,4 +75,20 @@ model Delivery {
   createdAt DateTime @default(now())
 
   @@index([orderId])
+  @@index([runId])
+}
+
+model Person {
+  id        String   @id @default(cuid())
+  name      String
+  role      String // "packer" | "receiver"
+  createdAt DateTime @default(now())
+}
+
+model NotifyRecipient {
+  id                String   @id @default(cuid())
+  email             String
+  notifyDispatch    Boolean  @default(true)
+  notifyDiscrepancy Boolean  @default(true)
+  createdAt         DateTime @default(now())
 }
