@@ -84,6 +84,7 @@ export type Person = {
 export type NotifyRecipient = {
   id: string;
   email: string;
+  notifyOrderCreated: boolean;
   notifyDispatch: boolean;
   notifyDiscrepancy: boolean;
 };

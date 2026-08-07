@@ -17,11 +17,12 @@ function envRecipients(list: string | undefined): string[] {
 
 /** DB-managed recipients (Setup tab) take priority; env vars are the fallback
     until someone's added there. */
-async function resolveRecipients(kind: "dispatch" | "discrepancy"): Promise<string[]> {
-  const field = kind === "dispatch" ? "notifyDispatch" : "notifyDiscrepancy";
+async function resolveRecipients(kind: "order" | "dispatch" | "discrepancy"): Promise<string[]> {
+  const field = kind === "order" ? "notifyOrderCreated" : kind === "dispatch" ? "notifyDispatch" : "notifyDiscrepancy";
   const rows = await prisma.notifyRecipient.findMany({ where: { [field]: true } });
   if (rows.length > 0) return rows.map((r) => r.email);
-  return envRecipients(kind === "dispatch" ? process.env.NOTIFY_DISPATCH_EMAILS : process.env.NOTIFY_DISCREPANCY_EMAILS);
+  const envVar = kind === "order" ? process.env.NOTIFY_ORDER_EMAILS : kind === "dispatch" ? process.env.NOTIFY_DISPATCH_EMAILS : process.env.NOTIFY_DISCREPANCY_EMAILS;
+  return envRecipients(envVar);
 }
 
 const FROM = () => process.env.EMAIL_FROM || "BSSP Order Tracker <onboarding@resend.dev>";
@@ -45,6 +46,49 @@ const tableHead = `
     </tr>
   </thead>
 `;
+
+export async function sendOrderCreatedEmail(order: Order) {
+  const to = await resolveRecipients("order");
+  const resend = client();
+  if (!resend || to.length === 0) {
+    console.warn("[email] Skipped order-created email — Resend not configured or no order recipients set.");
+    return;
+  }
+
+  const rows = order.lines
+    .map(
+      (l) =>
+        `<tr><td style="padding:4px 10px;">${l.partNo}</td><td style="padding:4px 10px;">${l.desc}</td><td style="padding:4px 10px;">${l.colour}</td><td style="padding:4px 10px;text-align:right;">${l.qtyOrdered}</td></tr>`
+    )
+    .join("");
+
+  try {
+    const { data, error } = await resend.emails.send({
+      from: FROM(),
+      to,
+      subject: `New order created — ${order.orderNo}`,
+      html: `
+        <h2 style="font-family:sans-serif;">New order — ${order.orderNo}</h2>
+        <p style="font-family:sans-serif;">${order.lines.length} line${order.lines.length === 1 ? "" : "s"} &middot; placed ${order.orderDate}${order.source === "excel_import" ? " &middot; imported from a file" : ""}</p>
+        <table cellspacing="0" cellpadding="0" style="border-collapse:collapse;font-family:sans-serif;font-size:13px;">
+          <thead>
+            <tr>
+              <th style="text-align:left;padding:4px 10px;border-bottom:1px solid #ddd;">Part</th>
+              <th style="text-align:left;padding:4px 10px;border-bottom:1px solid #ddd;">Description</th>
+              <th style="text-align:left;padding:4px 10px;border-bottom:1px solid #ddd;">Colour</th>
+              <th style="text-align:right;padding:4px 10px;border-bottom:1px solid #ddd;">Qty ordered</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `,
+    });
+    if (error) console.error("[email] Resend rejected order-created email:", error.name, "-", error.message);
+    else console.log("[email] Sent order-created email, id:", data?.id);
+  } catch (err) {
+    console.error("[email] Failed to send order-created email", err);
+  }
+}
 
 export async function sendDispatchCreatedEmail(order: Order, delivery: Delivery) {
   const to = await resolveRecipients("dispatch");

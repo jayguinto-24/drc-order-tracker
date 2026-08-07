@@ -86,9 +86,10 @@ model Person {
 }
 
 model NotifyRecipient {
-  id                String   @id @default(cuid())
-  email             String
-  notifyDispatch    Boolean  @default(true)
-  notifyDiscrepancy Boolean  @default(true)
-  createdAt         DateTime @default(now())
+  id                 String   @id @default(cuid())
+  email              String
+  notifyOrderCreated Boolean  @default(true)
+  notifyDispatch     Boolean  @default(true)
+  notifyDiscrepancy  Boolean  @default(true)
+  createdAt          DateTime @default(now())
 }

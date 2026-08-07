@@ -97,20 +97,24 @@ function linesFromRows(rows: string[][]): ParsedOrder {
   const header = cleaned[0].map((h) => h.toLowerCase());
   const find = (...keys: string[]) => header.findIndex((h) => keys.some((k) => h.includes(k)));
   const idx = {
-    partNo: find("part", "sku", "code"),
+    partNo: find("part", "sku", "code", "item no", "item#", "product"),
     desc: find("desc", "item", "name"),
-    colour: find("colour", "color"),
-    qty: find("qty", "quantity", "ordered"),
+    colour: find("colour", "color", "finish"),
+    qty: find("qty", "quantity", "ordered", "units", "amount", "each", "pcs", "count"),
   };
 
   const warnings: string[] = [];
   if (idx.partNo === -1) warnings.push("No 'part number' column found — using column 1.");
-  if (idx.qty === -1) warnings.push("No 'quantity' column found — lines without a recognisable qty will be skipped.");
+  if (idx.qty === -1) {
+    warnings.push("No 'quantity' column found (looked for headers like Qty/Quantity/Units/Amount) — every line was skipped. Try the downloadable template below to be sure of the column names.");
+    return { lines: [], warnings };
+  }
 
   const lines: ParsedOrder["lines"] = [];
   cleaned.slice(1).forEach((cells, i) => {
     const partNo = cells[idx.partNo !== -1 ? idx.partNo : 0] || "";
-    const qtyRaw = cells[idx.qty !== -1 ? idx.qty : -1];
+    // Strip anything but digits/decimal/minus so "1,200", "$50", "12 units" etc. still parse.
+    const qtyRaw = (cells[idx.qty] || "").replace(/[^0-9.-]/g, "");
     const qty = Number(qtyRaw);
     if (!partNo || !qtyRaw || Number.isNaN(qty) || qty <= 0) {
       warnings.push(`Row ${i + 2}: skipped — missing part number or a valid quantity.`);
@@ -141,6 +145,20 @@ function parseWorkbook(data: ArrayBuffer): ParsedOrder {
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1, blankrows: false, defval: "" });
   return linesFromRows(rows.map((r) => r.map((c) => String(c))));
+}
+
+/* Blank .xlsx with the exact headers the importer looks for, so uploads
+   don't depend on guessing column names correctly. */
+function downloadOrderTemplate() {
+  const rows = [
+    ["Part No", "Description", "Colour", "Qty"],
+    ["SW-2400", "Side wall panel 2.4m", "Colorbond Monument", 40],
+    ["EW-3000", "End wall panel 3.0m", "Colorbond Monument", 10],
+  ];
+  const sheet = XLSX.utils.aoa_to_sheet(rows);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, sheet, "Order");
+  XLSX.writeFile(workbook, "order-template.xlsx");
 }
 
 /* ------------------------- Shell --------------------------- */
@@ -264,8 +282,8 @@ export default function OrderTracker({ initialOrders, initialPeople, initialReci
     setPeople(updated);
   }
 
-  async function handleAddRecipient(email: string, notifyDispatch: boolean, notifyDiscrepancy: boolean) {
-    const updated = await addRecipient(email, notifyDispatch, notifyDiscrepancy);
+  async function handleAddRecipient(email: string, notifyOrderCreated: boolean, notifyDispatch: boolean, notifyDiscrepancy: boolean) {
+    const updated = await addRecipient(email, notifyOrderCreated, notifyDispatch, notifyDiscrepancy);
     setRecipients(updated);
   }
 
@@ -1009,6 +1027,13 @@ function OrderingView({ orders, activeOrderNo, setActiveOrderNo, onCreateManual,
 
       {mode === "import" && (
         <div style={{ background: T.panel, border: `1px solid ${T.line}`, borderRadius: "0 10px 10px 10px", padding: 18 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+            <span style={{ fontSize: 12.5, color: T.steel }}>Not sure of the column layout?</span>
+            <button type="button" onClick={downloadOrderTemplate} style={{ ...secondaryBtn, padding: "6px 10px", fontSize: 11.5 }}>
+              Download template
+            </button>
+          </div>
+
           <label style={labelStyle}>Order number</label>
           <input placeholder="e.g. BSSP-102" value={importOrderNo} onChange={(e) => setImportOrderNo(e.target.value)} style={inputStyle} />
 
@@ -1077,7 +1102,7 @@ function SetupView({ people, recipients, onAddPerson, onRemovePerson, onAddRecip
   recipients: NotifyRecipient[];
   onAddPerson: (name: string, role: PersonRole) => Promise<void>;
   onRemovePerson: (id: string) => Promise<void>;
-  onAddRecipient: (email: string, notifyDispatch: boolean, notifyDiscrepancy: boolean) => Promise<void>;
+  onAddRecipient: (email: string, notifyOrderCreated: boolean, notifyDispatch: boolean, notifyDiscrepancy: boolean) => Promise<void>;
   onRemoveRecipient: (id: string) => Promise<void>;
 }) {
   const [name, setName] = useState("");
@@ -1086,6 +1111,7 @@ function SetupView({ people, recipients, onAddPerson, onRemovePerson, onAddRecip
   const [personError, setPersonError] = useState<string | null>(null);
 
   const [email, setEmail] = useState("");
+  const [notifyOrderCreated, setNotifyOrderCreated] = useState(true);
   const [notifyDispatch, setNotifyDispatch] = useState(true);
   const [notifyDiscrepancy, setNotifyDiscrepancy] = useState(true);
   const [recipientBusy, setRecipientBusy] = useState(false);
@@ -1108,7 +1134,7 @@ function SetupView({ people, recipients, onAddPerson, onRemovePerson, onAddRecip
     setRecipientError(null);
     setRecipientBusy(true);
     try {
-      await onAddRecipient(email, notifyDispatch, notifyDiscrepancy);
+      await onAddRecipient(email, notifyOrderCreated, notifyDispatch, notifyDiscrepancy);
       setEmail("");
     } catch (err) {
       setRecipientError(err instanceof Error ? err.message : "Couldn't add that recipient.");
@@ -1164,8 +1190,11 @@ function SetupView({ people, recipients, onAddPerson, onRemovePerson, onAddRecip
 
       <div style={{ background: T.panel, border: `1px solid ${T.line}`, borderRadius: 10, padding: 18 }}>
         <div style={{ fontFamily: font.display, fontWeight: 700, fontSize: 14, marginBottom: 12 }}>Notification recipients</div>
-        <div style={{ display: "grid", gridTemplateColumns: "2fr auto auto auto", gap: 8, alignItems: "center" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "2fr auto auto auto auto", gap: 8, alignItems: "center" }}>
           <input placeholder="name@drcswitchboards.com.au" value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} />
+          <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 4, marginTop: 4 }}>
+            <input type="checkbox" checked={notifyOrderCreated} onChange={(e) => setNotifyOrderCreated(e.target.checked)} /> New order
+          </label>
           <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 4, marginTop: 4 }}>
             <input type="checkbox" checked={notifyDispatch} onChange={(e) => setNotifyDispatch(e.target.checked)} /> New despatch
           </label>
@@ -1181,7 +1210,7 @@ function SetupView({ people, recipients, onAddPerson, onRemovePerson, onAddRecip
         <div style={{ marginTop: 14 }}>
           {recipients.length === 0 && (
             <div style={{ fontSize: 12, color: T.faint }}>
-              None yet — falling back to the NOTIFY_DISPATCH_EMAILS / NOTIFY_DISCREPANCY_EMAILS environment variables.
+              None yet — falling back to the NOTIFY_ORDER_EMAILS / NOTIFY_DISPATCH_EMAILS / NOTIFY_DISCREPANCY_EMAILS environment variables.
             </div>
           )}
           {recipients.map((r) => (
@@ -1189,7 +1218,7 @@ function SetupView({ people, recipients, onAddPerson, onRemovePerson, onAddRecip
               <div>
                 <div>{r.email}</div>
                 <div style={{ fontSize: 11, color: T.faint }}>
-                  {[r.notifyDispatch && "New despatch", r.notifyDiscrepancy && "Discrepancy"].filter(Boolean).join(" · ") || "No alerts selected"}
+                  {[r.notifyOrderCreated && "New order", r.notifyDispatch && "New despatch", r.notifyDiscrepancy && "Discrepancy"].filter(Boolean).join(" · ") || "No alerts selected"}
                 </div>
               </div>
               <button onClick={() => onRemoveRecipient(r.id)} style={{ ...secondaryBtn, padding: "3px 8px", fontSize: 11 }}>Remove</button>

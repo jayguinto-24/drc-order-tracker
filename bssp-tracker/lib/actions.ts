@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
-import { sendDiscrepancyEmail, sendDispatchCreatedEmail, sendPoIncreaseRequestEmail, sendRunDispatchCreatedEmail } from "@/lib/email";
+import { sendDiscrepancyEmail, sendDispatchCreatedEmail, sendOrderCreatedEmail, sendPoIncreaseRequestEmail, sendRunDispatchCreatedEmail } from "@/lib/email";
 import { deliveryDeltas, lineReconciliation } from "@/lib/recon";
 import type { CountMap, DraftLine, NotifyRecipient, Order, OrdersMap, Person, PersonRole } from "@/lib/types";
 import type { Prisma } from "@/generated/prisma/client";
@@ -72,8 +72,10 @@ async function createOrder(orderNo: string, source: string, lines: { partNo: str
       },
       include: orderInclude,
     });
+    const created = toOrder(dbOrder);
+    await sendOrderCreatedEmail(created);
     revalidatePath("/");
-    return toOrder(dbOrder);
+    return created;
   } catch (err) {
     if (err && typeof err === "object" && "code" in err && err.code === "P2002") {
       throw new Error(`Order ${trimmed} already exists.`);
@@ -258,13 +260,24 @@ export async function removePerson(id: string): Promise<Person[]> {
 
 export async function listRecipients(): Promise<NotifyRecipient[]> {
   const recipients = await prisma.notifyRecipient.findMany({ orderBy: { createdAt: "asc" } });
-  return recipients.map((r) => ({ id: r.id, email: r.email, notifyDispatch: r.notifyDispatch, notifyDiscrepancy: r.notifyDiscrepancy }));
+  return recipients.map((r) => ({
+    id: r.id,
+    email: r.email,
+    notifyOrderCreated: r.notifyOrderCreated,
+    notifyDispatch: r.notifyDispatch,
+    notifyDiscrepancy: r.notifyDiscrepancy,
+  }));
 }
 
-export async function addRecipient(email: string, notifyDispatch: boolean, notifyDiscrepancy: boolean): Promise<NotifyRecipient[]> {
+export async function addRecipient(
+  email: string,
+  notifyOrderCreated: boolean,
+  notifyDispatch: boolean,
+  notifyDiscrepancy: boolean
+): Promise<NotifyRecipient[]> {
   const trimmed = email.trim();
   if (!trimmed) throw new Error("Email is required.");
-  await prisma.notifyRecipient.create({ data: { email: trimmed, notifyDispatch, notifyDiscrepancy } });
+  await prisma.notifyRecipient.create({ data: { email: trimmed, notifyOrderCreated, notifyDispatch, notifyDiscrepancy } });
   revalidatePath("/");
   return listRecipients();
 }
