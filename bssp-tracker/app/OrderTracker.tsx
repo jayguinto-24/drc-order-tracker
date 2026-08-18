@@ -84,40 +84,66 @@ const CARRIERS = ["BSSP Truck", "Mainfreight", "Other"];
 
 /* ------------------------- Helpers --------------------------- */
 
+/* Tries each keyword group in priority order, returning the first column
+   that matches a group — so a specific match (e.g. "part number") always
+   wins over a looser one (e.g. bare "part"), which otherwise risks matching
+   the wrong column on real-world templates that have several similarly
+   named columns (e.g. "ITEM No" vs "PART NUMBER"). */
+function findColumn(header: string[], ...priorityGroups: string[][]): number {
+  for (const keys of priorityGroups) {
+    const found = header.findIndex((h) => keys.some((k) => h.includes(k)));
+    if (found !== -1) return found;
+  }
+  return -1;
+}
+
 /* Shared row-processor for both the plain CSV/TSV path and the XLS/XLSX path
-   below — takes already-split rows of cells and does header detection +
-   line parsing. Accepts a header row containing some form of: part,
-   description, colour, qty. Column order and exact naming are flexible;
-   anything unrecognised is skipped with a warning rather than silently
-   guessed. */
+   below. Scans every row for one that looks like a real header (has both a
+   part-number-ish and a qty-ish column) rather than assuming it's row one —
+   real order forms (letterhead, company/order details, etc.) often have
+   several rows above the actual column headers. Column order and exact
+   naming are otherwise flexible. */
 function linesFromRows(rows: string[][]): ParsedOrder {
-  const cleaned = rows.map((r) => r.map((c) => String(c ?? "").trim())).filter((r) => r.some((c) => c.length > 0));
-  if (cleaned.length < 2) return { lines: [], warnings: ["No data rows found below the header."] };
+  const trimmed = rows.map((r) => r.map((c) => String(c ?? "").trim()));
 
-  const header = cleaned[0].map((h) => h.toLowerCase());
-  const find = (...keys: string[]) => header.findIndex((h) => keys.some((k) => h.includes(k)));
-  const idx = {
-    partNo: find("part", "sku", "code", "item no", "item#", "product"),
-    desc: find("desc", "item", "name"),
-    colour: find("colour", "color", "finish"),
-    qty: find("qty", "quantity", "ordered", "units", "amount", "each", "pcs", "count"),
-  };
-
-  const warnings: string[] = [];
-  if (idx.partNo === -1) warnings.push("No 'part number' column found — using column 1.");
-  if (idx.qty === -1) {
-    warnings.push("No 'quantity' column found (looked for headers like Qty/Quantity/Units/Amount) — every line was skipped. Try the downloadable template below to be sure of the column names.");
-    return { lines: [], warnings };
+  let headerRowIndex = -1;
+  let idx = { partNo: -1, desc: -1, colour: -1, qty: -1 };
+  for (let i = 0; i < trimmed.length; i++) {
+    const header = trimmed[i].map((h) => h.toLowerCase());
+    const partNo = findColumn(header, ["part number", "part no", "part#", "partno"], ["sku", "code", "product"], ["part"]);
+    const qty = findColumn(header, ["qty", "quantity"], ["units", "amount", "each", "pcs", "count", "ordered"]);
+    if (partNo !== -1 && qty !== -1) {
+      headerRowIndex = i;
+      idx = {
+        partNo,
+        qty,
+        desc: findColumn(header, ["description"], ["desc"], ["name"]),
+        colour: findColumn(header, ["colour", "color", "finish"]),
+      };
+      break;
+    }
   }
 
+  if (headerRowIndex === -1) {
+    return {
+      lines: [],
+      warnings: ["Couldn't find a row with both a part number and a quantity column anywhere in the file — try the downloadable template below to check the column names."],
+    };
+  }
+
+  const warnings: string[] = [];
   const lines: ParsedOrder["lines"] = [];
-  cleaned.slice(1).forEach((cells, i) => {
-    const partNo = cells[idx.partNo !== -1 ? idx.partNo : 0] || "";
+  trimmed.slice(headerRowIndex + 1).forEach((cells, i) => {
+    const partNo = cells[idx.partNo] || "";
     // Strip anything but digits/decimal/minus so "1,200", "$50", "12 units" etc. still parse.
     const qtyRaw = (cells[idx.qty] || "").replace(/[^0-9.-]/g, "");
     const qty = Number(qtyRaw);
     if (!partNo || !qtyRaw || Number.isNaN(qty) || qty <= 0) {
-      warnings.push(`Row ${i + 2}: skipped — missing part number or a valid quantity.`);
+      // Blank template rows (common in real order forms with pre-numbered
+      // empty rows) are expected and not worth a warning — only flag rows
+      // that have a part number but no usable quantity, since that's
+      // more likely a genuine data entry issue.
+      if (partNo) warnings.push(`Row ${headerRowIndex + i + 2}: "${partNo}" skipped — missing a valid quantity.`);
       return;
     }
     lines.push({
@@ -127,6 +153,8 @@ function linesFromRows(rows: string[][]): ParsedOrder {
       qtyOrdered: qty,
     });
   });
+
+  if (lines.length === 0) warnings.push("No lines with both a part number and a quantity were found below the header row.");
 
   return { lines, warnings };
 }
@@ -139,10 +167,14 @@ function parseDelimitedOrder(text: string): ParsedOrder {
   return linesFromRows(rows.map((r) => r.split(delim)));
 }
 
-/* .xls / .xlsx uploads — parsed client-side, no server round trip needed. */
+/* .xls / .xlsx uploads — parsed client-side, no server round trip needed.
+   Prefers a sheet named like "Order" (DRC's own template has separate
+   Order/Despatch/Receipt sheets in one workbook) and falls back to the
+   first sheet otherwise. */
 function parseWorkbook(data: ArrayBuffer): ParsedOrder {
   const workbook = XLSX.read(data, { type: "array" });
-  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  const orderSheetName = workbook.SheetNames.find((n) => /order/i.test(n)) ?? workbook.SheetNames[0];
+  const sheet = workbook.Sheets[orderSheetName];
   const rows = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1, blankrows: false, defval: "" });
   return linesFromRows(rows.map((r) => r.map((c) => String(c))));
 }
