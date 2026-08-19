@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { sendDiscrepancyEmail, sendDispatchCreatedEmail, sendOrderCreatedEmail, sendPoIncreaseRequestEmail, sendRunDispatchCreatedEmail } from "@/lib/email";
 import { deliveryDeltas, lineReconciliation } from "@/lib/recon";
-import type { CountMap, DraftLine, NotifyRecipient, Order, OrdersMap, Person, PersonRole } from "@/lib/types";
+import type { CountMap, DraftLine, NotifyRecipient, Order, OrdersMap, ParsedLine, Person, PersonRole } from "@/lib/types";
 import type { Prisma } from "@/generated/prisma/client";
 
 const orderInclude = {
@@ -19,14 +19,16 @@ function toOrder(dbOrder: DbOrder): Order {
     orderNo: dbOrder.orderNo,
     status: dbOrder.status,
     orderDate: dbOrder.orderDate.toISOString().slice(0, 10),
-    totalExGst: dbOrder.totalExGst,
+    totalExGst: dbOrder.lines.reduce((sum, l) => sum + (l.unitCost ?? 0) * l.qtyOrdered, 0),
     source: dbOrder.source,
     lines: dbOrder.lines.map((l) => ({
       id: l.id,
       partNo: l.partNo,
       desc: l.desc,
       colour: l.colour,
+      material: l.material,
       qtyOrdered: l.qtyOrdered,
+      unitCost: l.unitCost,
       jasonQty: l.jasonQty,
       overSupplyAccepted: l.overSupplyAccepted,
     })),
@@ -57,10 +59,10 @@ export async function getOrders(): Promise<OrdersMap> {
   return map;
 }
 
-async function createOrder(orderNo: string, source: string, lines: { partNo: string; desc: string; colour: string; qtyOrdered: number }[]): Promise<Order> {
+async function createOrder(orderNo: string, source: string, lines: ParsedLine[]): Promise<Order> {
   const trimmed = orderNo.trim();
   if (!trimmed) throw new Error("Order number is required.");
-  if (lines.length === 0) throw new Error("At least one line with a part number and quantity is required.");
+  if (lines.length === 0) throw new Error("At least one line with a description or part number, and a quantity, is required.");
 
   try {
     const dbOrder = await prisma.order.create({
@@ -86,21 +88,32 @@ async function createOrder(orderNo: string, source: string, lines: { partNo: str
 
 export async function createManualOrder(orderNo: string, draftLines: DraftLine[]): Promise<Order> {
   const lines = draftLines
-    .filter((l) => l.partNo.trim() && l.qty.trim())
-    .map((l) => ({ partNo: l.partNo, desc: l.desc, colour: l.colour || "—", qtyOrdered: Number(l.qty) }));
+    .filter((l) => (l.partNo.trim() || l.desc.trim()) && l.qty.trim())
+    .map((l) => ({
+      partNo: l.partNo || "—",
+      desc: l.desc,
+      colour: l.colour || "—",
+      material: l.material || "—",
+      qtyOrdered: Number(l.qty),
+      unitCost: l.cost.trim() ? Number(l.cost) : null,
+    }));
   return createOrder(orderNo, "manual", lines);
 }
 
-export async function createImportOrder(
-  orderNo: string,
-  lines: { partNo: string; desc: string; colour: string; qtyOrdered: number }[]
-): Promise<Order> {
+export async function createImportOrder(orderNo: string, lines: ParsedLine[]): Promise<Order> {
   return createOrder(orderNo, "excel_import", lines);
 }
 
 export async function updateLineQty(orderNo: string, lineId: string, qty: number): Promise<Order> {
   if (!Number.isFinite(qty) || qty < 0) throw new Error("Quantity must be a non-negative number.");
   await prisma.line.update({ where: { id: lineId }, data: { qtyOrdered: qty } });
+  revalidatePath("/");
+  return loadOrder(orderNo);
+}
+
+export async function updateLineCost(orderNo: string, lineId: string, unitCost: number | null): Promise<Order> {
+  if (unitCost !== null && (!Number.isFinite(unitCost) || unitCost < 0)) throw new Error("Cost must be a non-negative number.");
+  await prisma.line.update({ where: { id: lineId }, data: { unitCost } });
   revalidatePath("/");
   return loadOrder(orderNo);
 }

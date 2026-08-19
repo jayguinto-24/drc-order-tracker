@@ -16,7 +16,6 @@ model Order {
   orderNo    String     @unique
   status     String     @default("open")
   orderDate  DateTime   @default(now())
-  totalExGst Float      @default(0)
   source     String     @default("manual")
   createdAt  DateTime   @default(now())
   updatedAt  DateTime   @updatedAt
@@ -31,7 +30,11 @@ model Line {
   partNo     String
   desc       String
   colour     String
+  material   String  @default("—")
   qtyOrdered Int
+  // Unit cost ex GST, as it appears on the PO — used to show a Cost column
+  // on the DRC/Jason ledgers and to total up the order value.
+  unitCost   Float?
   // Jason's own count of what the order should be — entered independently on
   // the Border side, may legitimately differ from the PO qty Brett entered.
   jasonQty   Int?

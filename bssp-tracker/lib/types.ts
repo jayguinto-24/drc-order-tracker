@@ -5,7 +5,10 @@ export type Line = {
   partNo: string;
   desc: string;
   colour: string;
+  material: string;
   qtyOrdered: number;
+  /** Unit cost ex GST, as it appears on the PO. */
+  unitCost: number | null;
   /** Jason's own count of what the order should be — may differ from the PO qty. */
   jasonQty: number | null;
   /** Over-dispatch on this line accepted as a no-charge over-supply — suppresses the alert. */
@@ -69,9 +72,11 @@ export type Alerts = {
   clean: boolean;
 };
 
-export type DraftLine = { partNo: string; desc: string; colour: string; qty: string };
+export type DraftLine = { partNo: string; desc: string; colour: string; material: string; qty: string; cost: string };
 
-export type ParsedOrder = { lines: { partNo: string; desc: string; colour: string; qtyOrdered: number }[]; warnings: string[] };
+export type ParsedLine = { partNo: string; desc: string; colour: string; material: string; qtyOrdered: number; unitCost: number | null };
+
+export type ParsedOrder = { lines: ParsedLine[]; warnings: string[] };
 
 export type PersonRole = "packer" | "receiver";
 

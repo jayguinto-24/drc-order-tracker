@@ -15,6 +15,7 @@ import {
   submitRunDispatch,
   submitRunReceipt,
   updateJasonQty,
+  updateLineCost,
   updateLineQty,
 } from "@/lib/actions";
 import { deliveryDeltas, lineReconciliation, classifyAlerts } from "@/lib/recon";
@@ -82,6 +83,8 @@ const DEFAULT_RECEIVERS = ["Owen N", "Bree C", "Grace T"];
 
 const CARRIERS = ["BSSP Truck", "Mainfreight", "Other"];
 
+const BLANK_DRAFT_LINE: DraftLine = { partNo: "", desc: "", colour: "", material: "", qty: "", cost: "" };
+
 /* ------------------------- Helpers --------------------------- */
 
 /* Tries each keyword group in priority order, returning the first column
@@ -102,12 +105,14 @@ function findColumn(header: string[], ...priorityGroups: string[][]): number {
    part-number-ish and a qty-ish column) rather than assuming it's row one —
    real order forms (letterhead, company/order details, etc.) often have
    several rows above the actual column headers. Column order and exact
-   naming are otherwise flexible. */
+   naming are otherwise flexible. A line only needs a description OR a part
+   number (plus a qty) to count — some PO lines (freight, custom items) never
+   had a formal part number but are still real order lines. */
 function linesFromRows(rows: string[][]): ParsedOrder {
   const trimmed = rows.map((r) => r.map((c) => String(c ?? "").trim()));
 
   let headerRowIndex = -1;
-  let idx = { partNo: -1, desc: -1, colour: -1, qty: -1 };
+  let idx = { partNo: -1, desc: -1, colour: -1, material: -1, qty: -1, unitCost: -1 };
   for (let i = 0; i < trimmed.length; i++) {
     const header = trimmed[i].map((h) => h.toLowerCase());
     const partNo = findColumn(header, ["part number", "part no", "part#", "partno"], ["sku", "code", "product"], ["part"]);
@@ -119,6 +124,8 @@ function linesFromRows(rows: string[][]): ParsedOrder {
         qty,
         desc: findColumn(header, ["description"], ["desc"], ["name"]),
         colour: findColumn(header, ["colour", "color", "finish"]),
+        material: findColumn(header, ["material"]),
+        unitCost: findColumn(header, ["unit price", "unit cost"], ["cost"], ["price"]),
       };
       break;
     }
@@ -135,26 +142,31 @@ function linesFromRows(rows: string[][]): ParsedOrder {
   const lines: ParsedOrder["lines"] = [];
   trimmed.slice(headerRowIndex + 1).forEach((cells, i) => {
     const partNo = cells[idx.partNo] || "";
+    const desc = idx.desc !== -1 ? cells[idx.desc] || "" : "";
     // Strip anything but digits/decimal/minus so "1,200", "$50", "12 units" etc. still parse.
     const qtyRaw = (cells[idx.qty] || "").replace(/[^0-9.-]/g, "");
     const qty = Number(qtyRaw);
-    if (!partNo || !qtyRaw || Number.isNaN(qty) || qty <= 0) {
+    if ((!partNo && !desc) || !qtyRaw || Number.isNaN(qty) || qty <= 0) {
       // Blank template rows (common in real order forms with pre-numbered
       // empty rows) are expected and not worth a warning — only flag rows
-      // that have a part number but no usable quantity, since that's
-      // more likely a genuine data entry issue.
-      if (partNo) warnings.push(`Row ${headerRowIndex + i + 2}: "${partNo}" skipped — missing a valid quantity.`);
+      // that have some identifying info but no usable quantity, since
+      // that's more likely a genuine data entry issue.
+      if (partNo || desc) warnings.push(`Row ${headerRowIndex + i + 2}: "${partNo || desc}" skipped — missing a valid quantity.`);
       return;
     }
+    const costRaw = idx.unitCost !== -1 ? (cells[idx.unitCost] || "").replace(/[^0-9.-]/g, "") : "";
+    const unitCost = costRaw ? Number(costRaw) : null;
     lines.push({
-      partNo,
-      desc: idx.desc !== -1 ? cells[idx.desc] || "" : "",
+      partNo: partNo || "—",
+      desc,
       colour: idx.colour !== -1 ? cells[idx.colour] || "—" : "—",
+      material: idx.material !== -1 ? cells[idx.material] || "—" : "—",
       qtyOrdered: qty,
+      unitCost: unitCost !== null && !Number.isNaN(unitCost) ? unitCost : null,
     });
   });
 
-  if (lines.length === 0) warnings.push("No lines with both a part number and a quantity were found below the header row.");
+  if (lines.length === 0) warnings.push("No lines with a description or part number, and a quantity, were found below the header row.");
 
   return { lines, warnings };
 }
@@ -183,9 +195,9 @@ function parseWorkbook(data: ArrayBuffer): ParsedOrder {
    don't depend on guessing column names correctly. */
 function downloadOrderTemplate() {
   const rows = [
-    ["Part No", "Description", "Colour", "Qty"],
-    ["SW-2400", "Side wall panel 2.4m", "Colorbond Monument", 40],
-    ["EW-3000", "End wall panel 3.0m", "Colorbond Monument", 10],
+    ["Part No", "Description", "Colour", "Material", "Qty", "Unit Cost"],
+    ["SW-2400", "Side wall panel 2.4m", "Colorbond Monument", "Steel", 40, 45.5],
+    ["EW-3000", "End wall panel 3.0m", "Colorbond Monument", "Steel", 10, 62],
   ];
   const sheet = XLSX.utils.aoa_to_sheet(rows);
   const workbook = XLSX.utils.book_new();
@@ -295,6 +307,11 @@ export default function OrderTracker({ initialOrders, initialPeople, initialReci
     mergeOrder(updated);
   }
 
+  async function handleUpdateLineCost(lineId: string, unitCost: number | null) {
+    const updated = await updateLineCost(activeOrderNo, lineId, unitCost);
+    mergeOrder(updated);
+  }
+
   async function handleAcceptOverSupply(lineId: string) {
     const updated = await acceptOverSupply(activeOrderNo, lineId);
     mergeOrder(updated);
@@ -354,6 +371,7 @@ export default function OrderTracker({ initialOrders, initialPeople, initialReci
                 viewer="drc"
                 onUpdateJasonQty={handleUpdateJasonQty}
                 onUpdateLineQty={handleUpdateLineQty}
+                onUpdateLineCost={handleUpdateLineCost}
                 onAcceptOverSupply={handleAcceptOverSupply}
                 onRequestPoIncrease={handleRequestPoIncrease}
               />
@@ -366,6 +384,7 @@ export default function OrderTracker({ initialOrders, initialPeople, initialReci
             viewer="jason"
             onUpdateJasonQty={handleUpdateJasonQty}
             onUpdateLineQty={handleUpdateLineQty}
+            onUpdateLineCost={handleUpdateLineCost}
             onAcceptOverSupply={handleAcceptOverSupply}
             onRequestPoIncrease={handleRequestPoIncrease}
           />
@@ -566,11 +585,12 @@ function LockGlyph({ color }: { color: string }) {
 
 /* ------------------------- Master view --------------------------- */
 
-function MasterView({ order, viewer, onUpdateJasonQty, onUpdateLineQty, onAcceptOverSupply, onRequestPoIncrease }: {
+function MasterView({ order, viewer, onUpdateJasonQty, onUpdateLineQty, onUpdateLineCost, onAcceptOverSupply, onRequestPoIncrease }: {
   order: Order;
   viewer: string;
   onUpdateJasonQty: (lineId: string, qty: number | null) => void;
   onUpdateLineQty: (lineId: string, qty: number) => void;
+  onUpdateLineCost: (lineId: string, unitCost: number | null) => void;
   onAcceptOverSupply: (lineId: string) => void;
   onRequestPoIncrease: (lineId: string) => void;
 }) {
@@ -593,7 +613,7 @@ function MasterView({ order, viewer, onUpdateJasonQty, onUpdateLineQty, onAccept
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
           <thead>
             <tr style={{ background: T.navySoft, textAlign: "left" }}>
-              {["Part", "Colour", "Ordered", "Jason count", "Dispatched", "Received", "Back order", "Status"].map((h) => (
+              {["Part", "Colour", "Material", "Ordered", "Cost", "Jason count", "Dispatched", "Received", "Back order", "Status"].map((h) => (
                 <th key={h} style={{ padding: "9px 14px", fontSize: 10.5, letterSpacing: 0.5, textTransform: "uppercase", color: T.steel, fontWeight: 600 }}>{h}</th>
               ))}
             </tr>
@@ -614,8 +634,12 @@ function MasterView({ order, viewer, onUpdateJasonQty, onUpdateLineQty, onAccept
                       <div style={{ fontSize: 11.5, color: T.faint }}>{l.desc}</div>
                     </td>
                     <td style={{ padding: "10px 14px", fontSize: 12, color: T.steel }}>{l.colour}</td>
+                    <td style={{ padding: "10px 14px", fontSize: 12, color: T.steel }}>{l.material}</td>
                     <td style={{ padding: "10px 14px" }}>
                       <QtyEditCell qty={l.qtyOrdered} editable={isDrc} onCommit={(qty) => onUpdateLineQty(l.id, qty)} />
+                    </td>
+                    <td style={{ padding: "10px 14px" }}>
+                      <CostEditCell unitCost={l.unitCost} editable={isDrc} onCommit={(cost) => onUpdateLineCost(l.id, cost)} />
                     </td>
                     <td style={{ padding: "10px 14px" }}>
                       <JasonQtyCell line={l} editable={isJason} onCommit={(qty) => onUpdateJasonQty(l.id, qty)} />
@@ -629,7 +653,7 @@ function MasterView({ order, viewer, onUpdateJasonQty, onUpdateLineQty, onAccept
                   </tr>
                   {isOverSupplied && (
                     <tr>
-                      <td colSpan={8} style={{ padding: "0 14px 12px", background: "#FAFBFC" }}>
+                      <td colSpan={10} style={{ padding: "0 14px 12px", background: "#FAFBFC" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", padding: "10px 12px", background: T.flagSoft, borderRadius: 8 }}>
                           <span style={{ fontSize: 12, color: T.flag }}>
                             {Math.abs(l.backOrder)} more dispatched than ordered — request a PO increase, or accept it as a no-charge over-supply.
@@ -654,7 +678,7 @@ function MasterView({ order, viewer, onUpdateJasonQty, onUpdateLineQty, onAccept
                   )}
                   {isOpen && (
                     <tr>
-                      <td colSpan={8} style={{ padding: "0 14px 14px", background: "#FAFBFC" }}>
+                      <td colSpan={10} style={{ padding: "0 14px 14px", background: "#FAFBFC" }}>
                         <PerDeliveryBreakdown order={order} lineId={l.id} />
                       </td>
                     </tr>
@@ -708,6 +732,42 @@ function QtyEditCell({ qty, editable, onCommit }: {
         else setValue(String(qty));
       }}
       style={{ ...inputStyle, width: 70, margin: 0, textAlign: "right", fontFamily: font.mono }}
+    />
+  );
+}
+
+function CostEditCell({ unitCost, editable, onCommit }: {
+  unitCost: number | null;
+  editable: boolean;
+  onCommit: (unitCost: number | null) => void;
+}) {
+  const toStr = (cost: number | null) => (cost === null || cost === undefined ? "" : String(cost));
+  const [value, setValue] = useState(() => toStr(unitCost));
+  const [synced, setSynced] = useState(unitCost);
+
+  if (unitCost !== synced) {
+    setSynced(unitCost);
+    setValue(toStr(unitCost));
+  }
+
+  if (!editable) {
+    return <span style={{ fontFamily: font.mono }}>{unitCost !== null ? `$${unitCost.toFixed(2)}` : "—"}</span>;
+  }
+
+  return (
+    <input
+      type="number"
+      min="0"
+      step="0.01"
+      placeholder="—"
+      value={value}
+      onClick={(e) => e.stopPropagation()}
+      onChange={(e) => setValue(e.target.value)}
+      onBlur={() => {
+        const num = value.trim() === "" ? null : Number(value);
+        if (num !== (unitCost ?? null)) onCommit(Number.isNaN(num) ? null : num);
+      }}
+      style={{ ...inputStyle, width: 76, margin: 0, textAlign: "right", fontFamily: font.mono }}
     />
   );
 }
@@ -919,7 +979,7 @@ function OrderingView({ orders, activeOrderNo, setActiveOrderNo, onCreateManual,
 }) {
   const [mode, setMode] = useState("manual"); // 'manual' | 'import'
   const [newOrderNo, setNewOrderNo] = useState("");
-  const [lines, setLines] = useState<DraftLine[]>([{ partNo: "", desc: "", colour: "", qty: "" }]);
+  const [lines, setLines] = useState<DraftLine[]>([BLANK_DRAFT_LINE]);
   const [manualBusy, setManualBusy] = useState(false);
   const [manualError, setManualError] = useState<string | null>(null);
 
@@ -931,7 +991,7 @@ function OrderingView({ orders, activeOrderNo, setActiveOrderNo, onCreateManual,
   const [importError, setImportError] = useState<string | null>(null);
 
   function addLine() {
-    setLines([...lines, { partNo: "", desc: "", colour: "", qty: "" }]);
+    setLines([...lines, BLANK_DRAFT_LINE]);
   }
   function updateLine(i: number, field: keyof DraftLine, val: string) {
     setLines(lines.map((l, idx) => (idx === i ? { ...l, [field]: val } : l)));
@@ -943,7 +1003,7 @@ function OrderingView({ orders, activeOrderNo, setActiveOrderNo, onCreateManual,
     try {
       await onCreateManual(newOrderNo, lines);
       setNewOrderNo("");
-      setLines([{ partNo: "", desc: "", colour: "", qty: "" }]);
+      setLines([BLANK_DRAFT_LINE]);
     } catch (err) {
       setManualError(err instanceof Error ? err.message : "Couldn't create the order.");
     } finally {
@@ -1040,11 +1100,17 @@ function OrderingView({ orders, activeOrderNo, setActiveOrderNo, onCreateManual,
           <input placeholder="Order number, e.g. BSSP-095" value={newOrderNo} onChange={(e) => setNewOrderNo(e.target.value)}
             style={inputStyle} />
           {lines.map((l, i) => (
-            <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr 2fr 1fr 0.6fr", gap: 8, marginTop: 8 }}>
-              <input placeholder="Part no" value={l.partNo} onChange={(e) => updateLine(i, "partNo", e.target.value)} style={inputStyle} />
-              <input placeholder="Description" value={l.desc} onChange={(e) => updateLine(i, "desc", e.target.value)} style={inputStyle} />
-              <input placeholder="Colour" value={l.colour} onChange={(e) => updateLine(i, "colour", e.target.value)} style={inputStyle} />
-              <input placeholder="Qty" type="number" value={l.qty} onChange={(e) => updateLine(i, "qty", e.target.value)} style={inputStyle} />
+            <div key={i} style={{ paddingTop: 8, marginTop: 8, borderTop: i > 0 ? `1px dashed ${T.lineSoft}` : "none" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr 1fr", gap: 8 }}>
+                <input placeholder="Part no" value={l.partNo} onChange={(e) => updateLine(i, "partNo", e.target.value)} style={inputStyle} />
+                <input placeholder="Description" value={l.desc} onChange={(e) => updateLine(i, "desc", e.target.value)} style={inputStyle} />
+                <input placeholder="Colour" value={l.colour} onChange={(e) => updateLine(i, "colour", e.target.value)} style={inputStyle} />
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 0.6fr 0.6fr", gap: 8, marginTop: 6 }}>
+                <input placeholder="Material" value={l.material} onChange={(e) => updateLine(i, "material", e.target.value)} style={inputStyle} />
+                <input placeholder="Qty" type="number" value={l.qty} onChange={(e) => updateLine(i, "qty", e.target.value)} style={inputStyle} />
+                <input placeholder="Cost ea" type="number" value={l.cost} onChange={(e) => updateLine(i, "cost", e.target.value)} style={inputStyle} />
+              </div>
             </div>
           ))}
           {manualError && <div style={{ fontSize: 11.5, color: T.flag, marginTop: 10 }}>{manualError}</div>}
@@ -1096,7 +1162,9 @@ function OrderingView({ orders, activeOrderNo, setActiveOrderNo, onCreateManual,
                         <td style={{ padding: "6px 12px", fontFamily: font.mono }}>{l.partNo}</td>
                         <td style={{ padding: "6px 12px", color: T.steel }}>{l.desc}</td>
                         <td style={{ padding: "6px 12px", color: T.steel }}>{l.colour}</td>
+                        <td style={{ padding: "6px 12px", color: T.steel }}>{l.material}</td>
                         <td style={{ padding: "6px 12px", fontFamily: font.mono, textAlign: "right" }}>{l.qtyOrdered}</td>
+                        <td style={{ padding: "6px 12px", fontFamily: font.mono, textAlign: "right" }}>{l.unitCost !== null ? `$${l.unitCost.toFixed(2)}` : "—"}</td>
                       </tr>
                     ))}
                   </tbody>

@@ -19,15 +19,14 @@ async function main() {
       orderNo: "BSSP-087",
       status: "open",
       orderDate: new Date("2026-01-12"),
-      totalExGst: 12234.63,
       source: "manual",
       lines: {
         create: [
-          { partNo: "SW-2400", desc: "Side wall panel 2.4m", colour: "Colorbond Monument", qtyOrdered: 40 },
-          { partNo: "EW-3000", desc: "End wall panel 3.0m", colour: "Colorbond Monument", qtyOrdered: 10 },
-          { partNo: "RF-6000", desc: "Roof sheet 6.0m", colour: "Zincalume", qtyOrdered: 24 },
-          { partNo: "FL-BRK", desc: "Flashing bracket kit", colour: "—", qtyOrdered: 60 },
-          { partNo: "DR-HNG", desc: "Door hinge set", colour: "Powder white", qtyOrdered: 8 },
+          { partNo: "SW-2400", desc: "Side wall panel 2.4m", colour: "Colorbond Monument", material: "Steel", qtyOrdered: 40, unitCost: 45.5 },
+          { partNo: "EW-3000", desc: "End wall panel 3.0m", colour: "Colorbond Monument", material: "Steel", qtyOrdered: 10, unitCost: 62 },
+          { partNo: "RF-6000", desc: "Roof sheet 6.0m", colour: "Zincalume", material: "Steel", qtyOrdered: 24, unitCost: 38 },
+          { partNo: "FL-BRK", desc: "Flashing bracket kit", colour: "—", qtyOrdered: 60, unitCost: 4.2 },
+          { partNo: "DR-HNG", desc: "Door hinge set", colour: "Powder white", qtyOrdered: 8, unitCost: 12.75 },
         ],
       },
     },
@@ -81,7 +80,6 @@ async function main() {
       orderNo: "BSSP-091",
       status: "open",
       orderDate: new Date("2026-02-03"),
-      totalExGst: 4310.0,
       source: "manual",
       lines: {
         create: [
