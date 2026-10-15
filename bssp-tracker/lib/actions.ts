@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { sendDiscrepancyEmail, sendDispatchCreatedEmail, sendOrderCreatedEmail, sendPoIncreaseRequestEmail, sendRunDispatchCreatedEmail } from "@/lib/email";
 import { deliveryDeltas, lineReconciliation } from "@/lib/recon";
-import type { CountMap, DraftLine, NotifyRecipient, Order, OrdersMap, ParsedLine, Person, PersonRole } from "@/lib/types";
+import type { CountMap, DraftLine, NotifyRecipient, Order, OrdersMap, ParsedLine, Person, PersonRole, ProductionStageKey } from "@/lib/types";
 import type { Prisma } from "@/generated/prisma/client";
 
 const orderInclude = {
@@ -14,6 +14,17 @@ const orderInclude = {
 
 type DbOrder = Prisma.OrderGetPayload<{ include: typeof orderInclude }>;
 
+// Maps each ProductionStageKey to its DB column on Order.
+const STAGE_COLUMN: Record<ProductionStageKey, keyof Prisma.OrderUncheckedUpdateInput> = {
+  orderedReceived: "stageOrderedReceived",
+  engineeringDone: "stageEngineeringDone",
+  laserCut: "stageLaserCut",
+  punched: "stagePunched",
+  fabricating: "stageFabricating",
+  powderCoating: "stagePowderCoating",
+  packed: "stagePacked",
+};
+
 function toOrder(dbOrder: DbOrder): Order {
   return {
     orderNo: dbOrder.orderNo,
@@ -21,6 +32,15 @@ function toOrder(dbOrder: DbOrder): Order {
     orderDate: dbOrder.orderDate.toISOString().slice(0, 10),
     totalExGst: dbOrder.lines.reduce((sum, l) => sum + (l.unitCost ?? 0) * l.qtyOrdered, 0),
     source: dbOrder.source,
+    stages: {
+      orderedReceived: dbOrder.stageOrderedReceived,
+      engineeringDone: dbOrder.stageEngineeringDone,
+      laserCut: dbOrder.stageLaserCut,
+      punched: dbOrder.stagePunched,
+      fabricating: dbOrder.stageFabricating,
+      powderCoating: dbOrder.stagePowderCoating,
+      packed: dbOrder.stagePacked,
+    },
     lines: dbOrder.lines.map((l) => ({
       id: l.id,
       partNo: l.partNo,
@@ -102,6 +122,12 @@ export async function createManualOrder(orderNo: string, draftLines: DraftLine[]
 
 export async function createImportOrder(orderNo: string, lines: ParsedLine[]): Promise<Order> {
   return createOrder(orderNo, "excel_import", lines);
+}
+
+export async function updateOrderStage(orderNo: string, stage: ProductionStageKey, done: boolean): Promise<Order> {
+  await prisma.order.update({ where: { orderNo }, data: { [STAGE_COLUMN[stage]]: done } });
+  revalidatePath("/");
+  return loadOrder(orderNo);
 }
 
 export async function updateLineQty(orderNo: string, lineId: string, qty: number): Promise<Order> {

@@ -17,6 +17,7 @@ import {
   updateJasonQty,
   updateLineCost,
   updateLineQty,
+  updateOrderStage,
 } from "@/lib/actions";
 import { deliveryDeltas, lineReconciliation, classifyAlerts } from "@/lib/recon";
 import type {
@@ -30,6 +31,7 @@ import type {
   ParsedOrder,
   Person,
   PersonRole,
+  ProductionStageKey,
   ReconLine,
 } from "@/lib/types";
 
@@ -212,7 +214,18 @@ const ROLE_TABS = [
   { id: "jason", label: "Jason", tag: "Master · Border" },
   { id: "packer", label: "Packing crew", tag: "Border · blind" },
   { id: "receiver", label: "Goods in", tag: "DRC · blind" },
+  { id: "tracking", label: "Tracking", tag: "Sheetmetal · shop floor" },
   { id: "setup", label: "Setup", tag: "Admin" },
+];
+
+const PRODUCTION_STAGES: { key: ProductionStageKey; label: string }[] = [
+  { key: "orderedReceived", label: "Ordered Received" },
+  { key: "engineeringDone", label: "Engineering Done" },
+  { key: "laserCut", label: "Laser Cut" },
+  { key: "punched", label: "Punched" },
+  { key: "fabricating", label: "Fabricating" },
+  { key: "powderCoating", label: "Powder Coating" },
+  { key: "packed", label: "Packed" },
 ];
 
 /* Demo-only access codes for the two master roles. This is a client-side
@@ -312,6 +325,11 @@ export default function OrderTracker({ initialOrders, initialPeople, initialReci
     mergeOrder(updated);
   }
 
+  async function handleUpdateOrderStage(orderNo: string, stage: ProductionStageKey, done: boolean) {
+    const updated = await updateOrderStage(orderNo, stage, done);
+    mergeOrder(updated);
+  }
+
   async function handleAcceptOverSupply(lineId: string) {
     const updated = await acceptOverSupply(activeOrderNo, lineId);
     mergeOrder(updated);
@@ -407,6 +425,9 @@ export default function OrderTracker({ initialOrders, initialPeople, initialReci
             receiverNames={receiverNames.length > 0 ? receiverNames : DEFAULT_RECEIVERS}
             onSubmitRun={handleSubmitRunReceipt}
           />
+        )}
+        {role === "tracking" && (
+          <TrackingView orders={orders} onUpdateStage={handleUpdateOrderStage} />
         )}
         {role === "setup" && (
           <SetupView
@@ -1189,6 +1210,91 @@ function OrderingView({ orders, activeOrderNo, setActiveOrderNo, onCreateManual,
               {importBusy ? "Importing…" : "Create order from import"}
             </button>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------- Production tracker (sheetmetal) --------------------------- */
+
+/* Optimistic checkbox — flips instantly on click rather than waiting on the
+   server round-trip, then re-syncs once the real value comes back through
+   props. Without this a controlled checkbox snaps back to unchecked for a
+   frame while the request is in flight. */
+function StageCheckbox({ checked, onToggle }: { checked: boolean; onToggle: (next: boolean) => void }) {
+  const [localChecked, setLocalChecked] = useState(checked);
+  const [synced, setSynced] = useState(checked);
+
+  if (checked !== synced) {
+    setSynced(checked);
+    setLocalChecked(checked);
+  }
+
+  return (
+    <input
+      type="checkbox"
+      checked={localChecked}
+      onChange={(e) => {
+        setLocalChecked(e.target.checked);
+        onToggle(e.target.checked);
+      }}
+      style={{ width: 18, height: 18, cursor: "pointer" }}
+    />
+  );
+}
+
+function TrackingView({ orders, onUpdateStage }: {
+  orders: OrdersMap;
+  onUpdateStage: (orderNo: string, stage: ProductionStageKey, done: boolean) => Promise<void>;
+}) {
+  const orderList = Object.values(orders);
+
+  return (
+    <div>
+      <SectionHeader
+        title="Production tracker"
+        note="Every sheetmetal order lands here automatically — tick off each step as the job moves through the shop. No access code needed, visible to everyone."
+      />
+
+      {orderList.length === 0 ? (
+        <div style={{ border: `1px dashed ${T.line}`, borderRadius: 10, padding: 24, textAlign: "center", color: T.faint, fontSize: 13 }}>
+          No orders yet.
+        </div>
+      ) : (
+        <div style={{ background: T.panel, border: `1px solid ${T.line}`, borderRadius: 10, overflow: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+            <thead>
+              <tr style={{ background: T.navySoft, textAlign: "left" }}>
+                <th style={{ padding: "9px 14px", fontSize: 10.5, letterSpacing: 0.5, textTransform: "uppercase", color: T.steel, fontWeight: 600, whiteSpace: "nowrap" }}>
+                  Order
+                </th>
+                {PRODUCTION_STAGES.map((s) => (
+                  <th key={s.key} style={{ padding: "9px 10px", fontSize: 10, letterSpacing: 0.3, textTransform: "uppercase", color: T.steel, fontWeight: 600, textAlign: "center", whiteSpace: "nowrap" }}>
+                    {s.label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {orderList.map((o) => {
+                const doneCount = PRODUCTION_STAGES.filter((s) => o.stages[s.key]).length;
+                return (
+                  <tr key={o.orderNo} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                    <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}>
+                      <div style={{ fontFamily: font.mono, fontWeight: 700, fontSize: 13 }}>{o.orderNo}</div>
+                      <div style={{ fontSize: 10.5, color: T.faint }}>{doneCount}/{PRODUCTION_STAGES.length} done</div>
+                    </td>
+                    {PRODUCTION_STAGES.map((s) => (
+                      <td key={s.key} style={{ padding: "10px", textAlign: "center" }}>
+                        <StageCheckbox checked={o.stages[s.key]} onToggle={(next) => onUpdateStage(o.orderNo, s.key, next)} />
+                      </td>
+                    ))}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       )}
     </div>

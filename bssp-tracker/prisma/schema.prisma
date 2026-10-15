@@ -21,6 +21,17 @@ model Order {
   updatedAt  DateTime   @updatedAt
   lines      Line[]
   deliveries Delivery[]
+
+  // Sheetmetal production tracker — one shared board, visible to everyone,
+  // no per-line granularity. Ticked off in order as the job physically
+  // moves through DRC's shop floor.
+  stageOrderedReceived Boolean @default(false)
+  stageEngineeringDone Boolean @default(false)
+  stageLaserCut        Boolean @default(false)
+  stagePunched         Boolean @default(false)
+  stageFabricating     Boolean @default(false)
+  stagePowderCoating   Boolean @default(false)
+  stagePacked          Boolean @default(false)
 }
 
 model Line {

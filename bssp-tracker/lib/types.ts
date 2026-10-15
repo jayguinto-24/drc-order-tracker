@@ -34,6 +34,17 @@ export type Delivery = {
   receipt: DeliveryLeg | null;
 };
 
+export type ProductionStageKey =
+  | "orderedReceived"
+  | "engineeringDone"
+  | "laserCut"
+  | "punched"
+  | "fabricating"
+  | "powderCoating"
+  | "packed";
+
+export type ProductionStages = Record<ProductionStageKey, boolean>;
+
 export type Order = {
   orderNo: string;
   status: string;
@@ -42,6 +53,7 @@ export type Order = {
   source: string;
   lines: Line[];
   deliveries: Delivery[];
+  stages: ProductionStages;
 };
 
 export type OrdersMap = Record<string, Order>;
