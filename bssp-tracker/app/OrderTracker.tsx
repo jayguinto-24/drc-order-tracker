@@ -1244,57 +1244,79 @@ function StageCheckbox({ checked, onToggle }: { checked: boolean; onToggle: (nex
   );
 }
 
+function isStageComplete(order: Order): boolean {
+  return PRODUCTION_STAGES.every((s) => order.stages[s.key]);
+}
+
 function TrackingView({ orders, onUpdateStage }: {
   orders: OrdersMap;
   onUpdateStage: (orderNo: string, stage: ProductionStageKey, done: boolean) => Promise<void>;
 }) {
+  const [showCompleted, setShowCompleted] = useState(false);
   const orderList = Object.values(orders);
+  const activeOrders = orderList.filter((o) => !isStageComplete(o));
+  const completedOrders = orderList.filter((o) => isStageComplete(o));
+
+  function table(list: Order[]) {
+    return (
+      <div style={{ background: T.panel, border: `1px solid ${T.line}`, borderRadius: 10, overflow: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+          <thead>
+            <tr style={{ background: T.navySoft, textAlign: "left" }}>
+              <th style={{ padding: "9px 14px", fontSize: 10.5, letterSpacing: 0.5, textTransform: "uppercase", color: T.steel, fontWeight: 600, whiteSpace: "nowrap" }}>
+                Order
+              </th>
+              {PRODUCTION_STAGES.map((s) => (
+                <th key={s.key} style={{ padding: "9px 10px", fontSize: 10, letterSpacing: 0.3, textTransform: "uppercase", color: T.steel, fontWeight: 600, textAlign: "center", whiteSpace: "nowrap" }}>
+                  {s.label}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {list.map((o) => {
+              const doneCount = PRODUCTION_STAGES.filter((s) => o.stages[s.key]).length;
+              return (
+                <tr key={o.orderNo} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                  <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}>
+                    <div style={{ fontFamily: font.mono, fontWeight: 700, fontSize: 13 }}>{o.orderNo}</div>
+                    <div style={{ fontSize: 10.5, color: T.faint }}>{doneCount}/{PRODUCTION_STAGES.length} done</div>
+                  </td>
+                  {PRODUCTION_STAGES.map((s) => (
+                    <td key={s.key} style={{ padding: "10px", textAlign: "center" }}>
+                      <StageCheckbox checked={o.stages[s.key]} onToggle={(next) => onUpdateStage(o.orderNo, s.key, next)} />
+                    </td>
+                  ))}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
 
   return (
     <div>
       <SectionHeader
         title="Production tracker"
-        note="Every sheetmetal order lands here automatically — tick off each step as the job moves through the shop. No access code needed, visible to everyone."
+        note="Every sheetmetal order lands here automatically — tick off each step as the job moves through the shop. Drops off the list once every step's ticked. No access code needed, visible to everyone."
       />
 
-      {orderList.length === 0 ? (
+      {activeOrders.length === 0 ? (
         <div style={{ border: `1px dashed ${T.line}`, borderRadius: 10, padding: 24, textAlign: "center", color: T.faint, fontSize: 13 }}>
-          No orders yet.
+          {orderList.length === 0 ? "No orders yet." : "Nothing in progress — everything's complete."}
         </div>
       ) : (
-        <div style={{ background: T.panel, border: `1px solid ${T.line}`, borderRadius: 10, overflow: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
-            <thead>
-              <tr style={{ background: T.navySoft, textAlign: "left" }}>
-                <th style={{ padding: "9px 14px", fontSize: 10.5, letterSpacing: 0.5, textTransform: "uppercase", color: T.steel, fontWeight: 600, whiteSpace: "nowrap" }}>
-                  Order
-                </th>
-                {PRODUCTION_STAGES.map((s) => (
-                  <th key={s.key} style={{ padding: "9px 10px", fontSize: 10, letterSpacing: 0.3, textTransform: "uppercase", color: T.steel, fontWeight: 600, textAlign: "center", whiteSpace: "nowrap" }}>
-                    {s.label}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {orderList.map((o) => {
-                const doneCount = PRODUCTION_STAGES.filter((s) => o.stages[s.key]).length;
-                return (
-                  <tr key={o.orderNo} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
-                    <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}>
-                      <div style={{ fontFamily: font.mono, fontWeight: 700, fontSize: 13 }}>{o.orderNo}</div>
-                      <div style={{ fontSize: 10.5, color: T.faint }}>{doneCount}/{PRODUCTION_STAGES.length} done</div>
-                    </td>
-                    {PRODUCTION_STAGES.map((s) => (
-                      <td key={s.key} style={{ padding: "10px", textAlign: "center" }}>
-                        <StageCheckbox checked={o.stages[s.key]} onToggle={(next) => onUpdateStage(o.orderNo, s.key, next)} />
-                      </td>
-                    ))}
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+        table(activeOrders)
+      )}
+
+      {completedOrders.length > 0 && (
+        <div style={{ marginTop: 16 }}>
+          <button onClick={() => setShowCompleted((v) => !v)} style={secondaryBtn}>
+            {showCompleted ? "Hide" : "Show"} {completedOrders.length} completed order{completedOrders.length === 1 ? "" : "s"}
+          </button>
+          {showCompleted && <div style={{ marginTop: 10 }}>{table(completedOrders)}</div>}
         </div>
       )}
     </div>
